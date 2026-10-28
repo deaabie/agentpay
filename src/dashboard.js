@@ -225,6 +225,7 @@ export function renderDashboardHTML(sessionId = 'default') {
       </div>
       <div class="header-actions">
         <span id="session-tag" style="font-size: 12px; color: #8b949e; font-family: 'JetBrains Mono', monospace;">Session: ${sessionId}</span>
+        <button id="btn-reset" class="btn-killswitch" style="background: #21262d; border-color: #30363d; color: var(--text-bright);" onclick="resetCurrentSession()">🔄 Reset Session</button>
         <button id="btn-killswitch" class="btn-killswitch" onclick="toggleKillSwitch()">🛑 Kill Switch</button>
       </div>
     </header>
@@ -578,10 +579,49 @@ export function renderDashboardHTML(sessionId = 'default') {
       fetchState();
     }
 
+    async function resetCurrentSession() {
+      const btn = document.getElementById('btn-reset');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Resetting...';
+      }
+      try {
+        const customQ = parseInt(new URLSearchParams(window.location.search).get('quota'), 10);
+        await fetch('/api/session/' + sessionId + '/init', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            task: 'Audit multi-chain smart contracts & wallet activity on Base and Ethereum',
+            budgetCapUsd: 5.00,
+            quota: customQ > 0 ? {
+              rpc: { total: customQ, remaining: customQ },
+              read: { total: 20, remaining: 20 },
+              file: { total: 5, remaining: 5 }
+            } : undefined
+          })
+        });
+        await fetchState();
+      } catch (err) {
+        console.error('Reset error:', err);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '🔄 Reset Session';
+        }
+      }
+    }
+
     // Support optional ?quota=N URL param for custom demo exhaustion thresholds
     const urlParams = new URLSearchParams(window.location.search);
     const customQuota = parseInt(urlParams.get('quota'), 10);
-    if (customQuota > 0) {
+    const shouldReset = urlParams.get('reset') === 'true';
+
+    if (shouldReset) {
+      resetCurrentSession().then(() => {
+        const cleanUrl = window.location.pathname + (customQuota > 0 ? '?quota=' + customQuota + '&session=' + sessionId : '?session=' + sessionId);
+        window.history.replaceState({}, '', cleanUrl);
+      });
+    } else if (customQuota > 0) {
       fetch('/api/session/' + sessionId + '/state')
         .then(r => r.json())
         .then(s => {

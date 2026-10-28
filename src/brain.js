@@ -82,6 +82,7 @@ Required Output JSON Schema:
       ]);
       parsedDecision = this._parseAndValidateJSON(response.text);
     } catch (firstErr) {
+      console.warn('[Brain Deliberation] First attempt failed:', firstErr.message);
       // Retry ONCE with a concise repair prompt (§3)
       try {
         const repairResponse = await this.adapter.chat([
@@ -91,6 +92,7 @@ Required Output JSON Schema:
         ]);
         parsedDecision = this._parseAndValidateJSON(repairResponse.text);
       } catch (secondErr) {
+        console.warn('[Brain Deliberation] Repair retry failed:', secondErr.message);
         // Fail-safe to no_buy on invalid output
         parsedDecision = {
           action: 'no_buy',

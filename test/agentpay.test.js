@@ -7,7 +7,7 @@ import { AgentSession } from '../src/session-do.js';
 import { AgentLoop } from '../src/agent-loop.js';
 import { MCPClient } from '../src/mcp-client.js';
 import { Brain } from '../src/brain.js';
-import { SPARK_MODEL } from '../src/meta-adapter.js';
+import { SPARK_MODEL, extractTextFromResponse } from '../src/meta-adapter.js';
 import { SessionStatus, LedgerType, DEFAULT_MCP_SERVERS } from '../src/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -522,4 +522,82 @@ test('15. Meta Model Compliance: zero occurrences of "contributor" across src/ a
   }
 
   assert.equal(violations.length, 0, `Forbidden string 'contributor' found in src files: ${violations.join(', ')}`);
+});
+
+test('16. MetaModelAdapter: extractTextFromResponse handles string, array content blocks, and completions', () => {
+  // 1. Direct string
+  const dataString = { choices: [{ message: { content: '{"action":"buy"}' } }] };
+  assert.equal(extractTextFromResponse(dataString), '{"action":"buy"}');
+
+  // 2. Content array of text blocks (Anthropic / Meta block style)
+  const dataArray = {
+    choices: [{
+      message: {
+        content: [
+          { type: 'text', text: '{"action":"buy",' },
+          { type: 'text', text: '"item":"rpc-1000"}' }
+        ]
+      }
+    }]
+  };
+  assert.equal(extractTextFromResponse(dataArray), '{"action":"buy",\n"item":"rpc-1000"}');
+
+  // 3. Completions style choice.text
+  const dataCompletions = { choices: [{ text: '{"action":"no_buy"}' }] };
+  assert.equal(extractTextFromResponse(dataCompletions), '{"action":"no_buy"}');
+
+  // 4. Object content { text: "..." }
+  const dataObj = { choices: [{ message: { content: { text: '{"action":"wait"}' } } }] };
+  assert.equal(extractTextFromResponse(dataObj), '{"action":"wait"}');
+
+  // 5. Empty or missing content
+  assert.equal(extractTextFromResponse(null), '');
+  assert.equal(extractTextFromResponse({ choices: [] }), '');
+});
+
+test('17. AgentSession DO: handleInit completely resets state, quota, and clears latestDecision', async () => {
+  const sessionDO = createMockDO();
+  
+  // Set initial state with a decision
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'sess_reset_test', quota: { rpc: { total: 5, remaining: 0 } } })
+  }));
+
+  // Simulate a deliberate decision
+  sessionDO.adapter = {
+    chat: async () => ({
+      text: JSON.stringify({
+        action: 'buy',
+        item: 'rpc-1000',
+        rail: 'paypal',
+        estimated_cost_usd: 2.00,
+        estimated_calls_covered: 1000,
+        reasoning: 'Testing reset.',
+        alternative_considered: 'None'
+      })
+    })
+  };
+  await sessionDO.fetch(new Request('https://do/deliberate', { method: 'POST', body: '{}' }));
+
+  let state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  assert.ok(state.latestDecision, 'Decision must be present before reset');
+  assert.equal(state.status, SessionStatus.AWAITING_PURCHASE);
+
+  // Trigger Reset via handleInit
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'sess_reset_test',
+      quota: { rpc: { total: 10, remaining: 10 } }
+    })
+  }));
+
+  state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  assert.equal(state.status, SessionStatus.IDLE, 'Status must reset to IDLE');
+  assert.equal(state.quota.rpc.remaining, 10, 'Quota must reset to new value');
+  assert.equal(state.latestDecision, null, 'latestDecision must be cleared on reset');
+  assert.equal(state.stepCount, 0, 'stepCount must reset to 0');
 });

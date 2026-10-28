@@ -100,6 +100,7 @@ export class AgentSession {
       status: SessionStatus.IDLE,
       isFrozen: false,
       stepCount: 0,
+      latestDecision: null,
       quota: {
         rpc: {
           total: body.quota?.rpc?.total ?? INITIAL_DEMO_QUOTA.rpc.total,

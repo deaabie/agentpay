@@ -16,6 +16,7 @@
 
 import { AgentSession } from './session-do.js';
 import { AgentLoop } from './agent-loop.js';
+import { MetaModelAdapter, SPARK_MODEL } from './meta-adapter.js';
 import { renderDashboardHTML } from './dashboard.js';
 import { DEFAULT_MCP_SERVERS } from './types.js';
 
@@ -48,6 +49,52 @@ export default {
       }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
+    }
+
+    // Diagnostic endpoint: live test Meta Model API directly with dummy prompt
+    if (path === '/api/test-spark') {
+      try {
+        const apiKey = env.META_MODEL_API_KEY || null;
+        if (!apiKey) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: 'META_MODEL_API_KEY is not configured in Worker secrets.'
+          }), {
+            status: 500,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+
+        const adapter = new MetaModelAdapter({ apiKey });
+        const result = await adapter.chat([
+          {
+            role: 'system',
+            content: 'You are a test assistant. Answer ONLY in JSON format: {"status": "ok", "message": "hello from muse-spark"}'
+          },
+          {
+            role: 'user',
+            content: 'Say hello in JSON'
+          }
+        ]);
+
+        return new Response(JSON.stringify({
+          success: true,
+          model: SPARK_MODEL,
+          extractedText: result.text,
+          diagnostic: result.diagnostic,
+          usage: result.usage
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: err.message
+        }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
     }
 
     // Dashboard root
