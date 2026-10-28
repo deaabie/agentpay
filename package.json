@@ -1,0 +1,27 @@
+{
+  "name": "agentpay",
+  "version": "1.0.0",
+  "description": "Autonomous AI Agent Operating Budget Manager on PayPal Fiat Rails and x402 Base USDC",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "keywords": [
+    "agentpay",
+    "ai-agent",
+    "mcp",
+    "model-context-protocol",
+    "meta-hackathon",
+    "durable-objects",
+    "paypal",
+    "x402"
+  ],
+  "author": "Skuuy Tools",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^4.151.1"
+  }
+}

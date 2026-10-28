@@ -1,0 +1,17 @@
+name = "agentpay"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "production"
+PUBLIC_BASE_URL = "https://agentpay.skuuy.com"
+
+[durable_objects]
+bindings = [
+  { name = "AGENTPAY_SESSIONS", class_name = "AgentSession" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentSession"]

@@ -1,0 +1,230 @@
+/**
+ * AgentPay Agent Loop v1 Task Executor
+ * 
+ * Executes real multi-chain tasks using generic MCP tools (skuuy-mcp & ondocs).
+ * Consumes REAL RPC quota on each execution step.
+ * 
+ * Strict v1 Rule (§8):
+ * - At quota exhaustion (remaining === 0), loop PAUSES CLEANLY.
+ * - DOES NOT BUY ANYTHING YET (economic deliberation & buy wiring are scheduled for 29-30 Oct).
+ */
+
+import { MCPClient } from './mcp-client.js';
+import { SessionStatus, LedgerType, ResourceType, DEFAULT_MCP_SERVERS } from './types.js';
+
+export class AgentLoop {
+  /**
+   * @param {Object} doStub - Durable Object stub or mock coordinator
+   * @param {Array} servers - List of MCP server configs
+   */
+  constructor(doStub, servers = DEFAULT_MCP_SERVERS) {
+    this.doStub = doStub;
+    this.mcpClient = new MCPClient(servers);
+    this.initialized = false;
+  }
+
+  /**
+   * Initialize generic MCP connections and register server status in DO
+   */
+  async setup() {
+    if (this.initialized) return;
+
+    // Connect to all configured servers (skuuy-mcp + ondocs)
+    const serverStatuses = await this.mcpClient.initializeAll();
+    
+    // Update connected servers snapshot in DO
+    if (this.doStub) {
+      await this.doStub.fetch('https://do/update-servers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ servers: serverStatuses })
+      });
+    }
+
+    this.initialized = true;
+    return serverStatuses;
+  }
+
+  /**
+   * Execute a single step in the task sequence
+   * @param {number} stepIndex
+   */
+  async executeStep(stepIndex) {
+    await this.setup();
+
+    // 1. Check current session state from DO
+    const stateRes = await this.doStub.fetch('https://do/state');
+    const state = await stateRes.json();
+
+    if (state.isFrozen) {
+      return {
+        halted: true,
+        reason: 'SESSION_FROZEN',
+        status: SessionStatus.FROZEN_BY_KILLSWITCH
+      };
+    }
+
+    if (state.status === SessionStatus.PAUSED_QUOTA_EXHAUSTED || state.quota.rpc.remaining <= 0) {
+      return {
+        halted: true,
+        reason: 'QUOTA_EXHAUSTED',
+        status: SessionStatus.PAUSED_QUOTA_EXHAUSTED
+      };
+    }
+
+    // 2. Define real task steps
+    // Multi-chain wallet & contract freshness audit
+    const demoSteps = [
+      {
+        name: 'Verify generic documentation via ondocs MCP',
+        type: 'docs',
+        server: 'ondocs',
+        tool: 'search',
+        args: { query: 'getting started' },
+        resource: ResourceType.READ,
+        units: 1,
+        desc: 'Consulted ondocs MCP documentation for runtime specs'
+      },
+      {
+        name: 'Query Base latest block height',
+        type: 'rpc',
+        server: 'skuuy-mcp',
+        tool: 'skuuy_rpc',
+        args: { chain: 'base', method: 'eth_blockNumber', params: [] },
+        resource: ResourceType.RPC,
+        units: 1,
+        desc: 'Read latest blockNumber from Base via skuuy_rpc'
+      },
+      {
+        name: 'Query Ethereum latest block height',
+        type: 'rpc',
+        server: 'skuuy-mcp',
+        tool: 'skuuy_rpc',
+        args: { chain: 'eth', method: 'eth_blockNumber', params: [] },
+        resource: ResourceType.RPC,
+        units: 1,
+        desc: 'Read latest blockNumber from Ethereum via skuuy_rpc'
+      },
+      {
+        name: 'Verify Base chain ID',
+        type: 'rpc',
+        server: 'skuuy-mcp',
+        tool: 'skuuy_rpc',
+        args: { chain: 'base', method: 'eth_chainId', params: [] },
+        resource: ResourceType.RPC,
+        units: 1,
+        desc: 'Verified Base chainId via skuuy_rpc'
+      },
+      {
+        name: 'Audit Vitalik wallet balance on Base',
+        type: 'rpc',
+        server: 'skuuy-mcp',
+        tool: 'skuuy_rpc',
+        args: { chain: 'base', method: 'eth_getBalance', params: ['0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', 'latest'] },
+        resource: ResourceType.RPC,
+        units: 1,
+        desc: 'Checked Vitalik wallet balance on Base'
+      },
+      {
+        name: 'Audit Coinbase Deployer balance on Base',
+        type: 'rpc',
+        server: 'skuuy-mcp',
+        tool: 'skuuy_rpc',
+        args: { chain: 'base', method: 'eth_getBalance', params: ['0x1111111254fb6c44bac0bed2854e76f90643097d', 'latest'] },
+        resource: ResourceType.RPC,
+        units: 1,
+        desc: 'Checked 1inch router balance on Base'
+      }
+    ];
+
+    // Pick action for this step (cycling through real calls)
+    const taskDef = demoSteps[stepIndex % demoSteps.length];
+
+    // 3. Update status to EXECUTING
+    await this.doStub.fetch('https://do/update-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: SessionStatus.EXECUTING, reason: taskDef.name })
+    });
+
+    // 4. Execute real tool call on the live MCP server
+    let toolResult;
+    try {
+      toolResult = await this.mcpClient.callTool(taskDef.tool, taskDef.args);
+    } catch (err) {
+      toolResult = { success: false, error: err.message };
+    }
+
+    // 5. Deduct quota atomically from DO
+    const deductRes = await this.doStub.fetch('https://do/deduct-quota', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resource: taskDef.resource, units: taskDef.units })
+    });
+
+    const deductData = await deductRes.json();
+
+    // 6. Record zero-log spend ledger entry
+    await this.doStub.fetch('https://do/add-ledger', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: LedgerType.USAGE,
+        resource: taskDef.resource,
+        units: taskDef.units,
+        costUsd: 0.00,
+        rail: 'free_tier',
+        reasoning: `${taskDef.desc} (MCP tool: ${taskDef.tool}, server: ${taskDef.server})`,
+        status: toolResult.success ? 'success' : 'failed'
+      })
+    });
+
+    // 7. Check if quota exhausted after this call
+    if (!deductData.success || deductData.status === SessionStatus.PAUSED_QUOTA_EXHAUSTED) {
+      return {
+        halted: true,
+        reason: 'QUOTA_EXHAUSTED',
+        status: SessionStatus.PAUSED_QUOTA_EXHAUSTED,
+        step: taskDef.name,
+        remaining: deductData.remaining
+      };
+    }
+
+    return {
+      halted: false,
+      step: taskDef.name,
+      status: SessionStatus.EXECUTING,
+      remaining: deductData.remaining,
+      toolSuccess: toolResult.success
+    };
+  }
+
+  /**
+   * Run the loop until completion or quota exhaustion
+   * @param {number} maxSteps
+   */
+  async runUntilPause(maxSteps = 50) {
+    await this.setup();
+
+    const results = [];
+    for (let i = 0; i < maxSteps; i++) {
+      const stepRes = await this.executeStep(i);
+      results.push(stepRes);
+
+      if (stepRes.halted) {
+        break;
+      }
+    }
+
+    const finalStateRes = await this.doStub.fetch('https://do/state');
+    const finalState = await finalStateRes.json();
+
+    return {
+      completedSteps: results.length,
+      finalStatus: finalState.status,
+      quotaRemaining: finalState.quota,
+      isFrozen: finalState.isFrozen,
+      steps: results
+    };
+  }
+}
