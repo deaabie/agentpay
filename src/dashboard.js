@@ -547,11 +547,25 @@ export function renderDashboardHTML(sessionId = 'default') {
       btn.innerText = 'Running...';
 
       try {
-        await fetch('/api/session/' + sessionId + '/run', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ maxSteps: 20 })
-        });
+        while (true) {
+          const res = await fetch('/api/session/' + sessionId + '/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ maxSteps: 20 })
+          });
+          const data = await res.json();
+          await fetchState();
+
+          // Stop if session is paused (quota exhausted), deliberated/awaiting purchase, frozen, or error
+          if (data.finalStatus !== 'executing' && data.finalStatus !== 'idle') {
+            break;
+          }
+          if (!data.steps || data.steps.length === 0 || data.steps.some(s => s.halted)) {
+            break;
+          }
+        }
+      } catch (err) {
+        console.error('Run task error:', err);
       } finally {
         btn.disabled = false;
         btn.innerText = '▶ Run Agent Task';
@@ -562,6 +576,30 @@ export function renderDashboardHTML(sessionId = 'default') {
     async function toggleKillSwitch() {
       await fetch('/api/session/' + sessionId + '/freeze', { method: 'POST' });
       fetchState();
+    }
+
+    // Support optional ?quota=N URL param for custom demo exhaustion thresholds
+    const urlParams = new URLSearchParams(window.location.search);
+    const customQuota = parseInt(urlParams.get('quota'), 10);
+    if (customQuota > 0) {
+      fetch('/api/session/' + sessionId + '/state')
+        .then(r => r.json())
+        .then(s => {
+          if (s.stepCount === 0 && s.quota && s.quota.rpc.total !== customQuota) {
+            return fetch('/api/session/' + sessionId + '/init', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                quota: {
+                  rpc: { total: customQuota, remaining: customQuota },
+                  read: { total: 20, remaining: 20 },
+                  file: { total: 5, remaining: 5 }
+                }
+              })
+            }).then(() => fetchState());
+          }
+        })
+        .catch(() => {});
     }
 
     // Initial state fetch

@@ -42,7 +42,7 @@ export class MetaModelAdapter {
       response_format: params.response_format || { type: 'json_object' }
     };
 
-    const res = await fetch(`${this.baseUrl}/chat/completions`, {
+    let res = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -50,6 +50,26 @@ export class MetaModelAdapter {
       },
       body: JSON.stringify(payload)
     });
+
+    // If 400 error is caused by response_format compatibility, retry once without it
+    if (!res.ok && res.status === 400) {
+      try {
+        const errClone = res.clone();
+        const errText = await errClone.text();
+        if (errText.toLowerCase().includes('response_format')) {
+          const fallbackPayload = { ...payload };
+          delete fallbackPayload.response_format;
+          res = await fetch(`${this.baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${this.apiKey}`
+            },
+            body: JSON.stringify(fallbackPayload)
+          });
+        }
+      } catch (_) {}
+    }
 
     if (!res.ok) {
       const errorText = await res.text();
