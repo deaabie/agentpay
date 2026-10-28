@@ -47,6 +47,8 @@ AI agents executing multi-step tasks often hit external API rate limits, RPC cei
 
 - **Session Coordinator**: A single-threaded, stateful actor (`AgentSession` Durable Object) providing authoritative state management, atomic quota decrement, and an owner-controlled emergency freeze mechanism.
 - **Reasoning Core**: Powered by Meta Muse Spark (`muse-spark-1.3`) for task planning, resource estimation, and economic deliberation.
+- **Visual Receipts**: Rendered via Meta Muse Image (`muse-image-1.0`) generating minimal transaction cards persisted to R2 storage.
+- **Engineered with Meta Tooling**: Core runtime, state machine coordination, and agent loops were constructed using Meta's **Muse Code** coding agent.
 - **Config-Driven MCP Client**: Protocol-compliant (`2025-11-25`) Streamable HTTP client that dynamically discovers tools at runtime via `tools/list` across configured endpoints.
 - **Dual Payment Rails**:
   - **PayPal Orders v2 & Vault Spending Mandate**: One-time delegation permitting autonomous settlement for quota packs without requiring human presence at each purchase.
@@ -91,6 +93,7 @@ In accordance with hackathon guidelines, pre-existing and event-built components
   - PayPal Vault spending mandate verification and autonomous charge executor.
   - Real-time telemetry dashboard and zero-log spend ledger.
   - Receipt narrative and visual card generation pipeline via Meta Muse Image.
+  - All event-built code constructed using Meta's **Muse Code** coding agent.
 
 ---
 

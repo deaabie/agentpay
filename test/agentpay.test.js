@@ -263,3 +263,70 @@ test('8. ondocs ONCE-ONLY Rule (§8): proof runs once at setup and never cycles 
     assert.equal(usage.resource, 'rpc', 'All loop task steps must be pure RPC operations');
   }
 });
+
+test('9. Quota Safety: failed tool call records failed entry with 0 units and does NOT deduct quota', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_fail_quota',
+      quota: { rpc: { total: 10, remaining: 10 } }
+    })
+  }));
+
+  const loop = new AgentLoop(sessionDO, DEFAULT_MCP_SERVERS);
+  // Simulate network/RPC error
+  loop.mcpClient.callTool = async () => {
+    throw new Error('Simulated network error');
+  };
+
+  const stepResult = await loop.executeStep(0);
+  assert.equal(stepResult.toolSuccess, false, 'Step should record failure');
+
+  // Verify DO quota was NOT deducted
+  const stateRes = await sessionDO.fetch(new Request('https://do/state'));
+  const state = await stateRes.json();
+  assert.equal(state.quota.rpc.remaining, 10, 'Quota must NOT be deducted on failed tool calls');
+
+  // Verify failed entry exists with units: 0
+  const failedEntry = state.ledger.find(e => e.status === 'failed');
+  assert.ok(failedEntry, 'Failed tool call must be recorded in ledger');
+  assert.equal(failedEntry.units, 0, 'Failed entry must have 0 units deducted');
+});
+
+test('10. Transparency: ondocs proof failure records failed SYSTEM entry without halting task', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_ondocs_fail',
+      quota: { rpc: { total: 5, remaining: 5 } }
+    })
+  }));
+
+  const loop = new AgentLoop(sessionDO, DEFAULT_MCP_SERVERS);
+  // Force search on ondocs to fail
+  const origCall = loop.mcpClient.callTool.bind(loop.mcpClient);
+  loop.mcpClient.callTool = async (tool, args) => {
+    if (tool === 'search') {
+      throw new Error('Simulated ondocs 503 error');
+    }
+    return origCall(tool, args);
+  };
+
+  // Run setup()
+  await loop.setup();
+
+  const stateRes = await sessionDO.fetch(new Request('https://do/state'));
+  const state = await stateRes.json();
+
+  const failedProofEntry = state.ledger.find(e => 
+    e.type === LedgerType.SYSTEM && e.status === 'failed' && e.reasoning && e.reasoning.includes('ondocs')
+  );
+
+  assert.ok(failedProofEntry, 'ondocs proof failure must be honestly recorded in ledger');
+  assert.equal(failedProofEntry.units, 0, 'Proof failure must not deduct quota');
+  assert.equal(state.quota.rpc.remaining, 5, 'Quota must remain intact');
+});
