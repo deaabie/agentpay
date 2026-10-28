@@ -16,12 +16,15 @@ export class AgentLoop {
   /**
    * @param {Object} doStub - Durable Object stub or mock coordinator
    * @param {Array} servers - List of MCP server configs
+   * @param {Object} [options] - Loop options (e.g. customAdapter for brain)
    */
-  constructor(doStub, servers = DEFAULT_MCP_SERVERS) {
+  constructor(doStub, servers = DEFAULT_MCP_SERVERS, options = {}) {
     this.doStub = doStub;
     this.mcpClient = new MCPClient(servers);
+    this.customAdapter = options.customAdapter || null;
     this.initialized = false;
     this.ondocsProofRan = false;
+    this.deliberationRan = false;
   }
 
   /**
@@ -239,10 +242,28 @@ export class AgentLoop {
 
     // 7. Check if quota exhausted after this call
     if (!deductData.success || deductData.status === SessionStatus.PAUSED_QUOTA_EXHAUSTED) {
+      let deliberateResult = null;
+      if (!this.deliberationRan && this.doStub) {
+        this.deliberationRan = true;
+        try {
+          const dRes = await this.doStub.fetch('https://do/deliberate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              customAdapter: this.customAdapter || null
+            })
+          });
+          deliberateResult = await dRes.json();
+        } catch (delibErr) {
+          console.warn('[!] Deliberation invocation error:', delibErr.message);
+        }
+      }
+
       return {
         halted: true,
         reason: 'QUOTA_EXHAUSTED',
-        status: SessionStatus.PAUSED_QUOTA_EXHAUSTED,
+        status: deliberateResult?.sessionStatus || SessionStatus.PAUSED_QUOTA_EXHAUSTED,
+        decision: deliberateResult?.decision || null,
         step: taskDef.name,
         remaining: deductData.remaining
       };

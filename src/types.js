@@ -12,6 +12,8 @@ export const SessionStatus = {
   EXECUTING: 'executing',
   MONITORING: 'monitoring',
   PAUSED_QUOTA_EXHAUSTED: 'paused_quota_exhausted',
+  DELIBERATING: 'deliberating',
+  AWAITING_PURCHASE: 'awaiting_purchase',
   FROZEN_BY_KILLSWITCH: 'frozen_by_killswitch',
   COMPLETED: 'completed',
   ERROR: 'error'
@@ -50,3 +52,18 @@ export const INITIAL_DEMO_QUOTA = {
   read: { total: 20, remaining: 20, consumed: 0 },
   file: { total: 5, remaining: 5, consumed: 0 }
 };
+
+/**
+ * Live Canonical Pricing Catalogue Allowlist
+ * Verified from PayPal sandbox Orders v2 rails & x402 on-chain specs.
+ * Code guardrail strictly checks against this allowlist.
+ */
+export const CATALOGUE_ALLOWLIST = [
+  { item: 'read-100', resource: 'read', calls: 100, priceUsd: 1.00, rail: 'paypal' },
+  { item: 'read-500', resource: 'read', calls: 500, priceUsd: 4.50, rail: 'paypal' },
+  { item: 'rpc-1000', resource: 'rpc', calls: 1000, priceUsd: 2.00, rail: 'paypal' },
+  { item: 'rpc-5000', resource: 'rpc', calls: 5000, priceUsd: 8.00, rail: 'paypal' },
+  { item: 'file-25', resource: 'file', calls: 25, priceUsd: 1.00, rail: 'paypal' },
+  { item: 'file-100', resource: 'file', calls: 100, priceUsd: 3.00, rail: 'paypal' },
+  { item: 'x402-rpc-micro', resource: 'rpc', calls: 1, priceUsd: 0.001, rail: 'x402' }
+];

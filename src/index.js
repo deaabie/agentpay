@@ -126,6 +126,20 @@ export default {
         });
       }
 
+      // POST /api/session/:id/deliberate (Trigger economic deliberation directly)
+      if (subpath === '/deliberate' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const res = await doStub.fetch('https://do/deliberate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        return new Response(JSON.stringify(data), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
       // GET /api/session/:id/stream (SSE Stream)
       if (subpath === '/stream' && request.method === 'GET') {
         return await doStub.fetch('https://do/stream');

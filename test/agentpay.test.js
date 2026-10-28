@@ -1,9 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AgentSession } from '../src/session-do.js';
 import { AgentLoop } from '../src/agent-loop.js';
 import { MCPClient } from '../src/mcp-client.js';
+import { Brain } from '../src/brain.js';
+import { SPARK_MODEL } from '../src/meta-adapter.js';
 import { SessionStatus, LedgerType, DEFAULT_MCP_SERVERS } from '../src/types.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // In-memory mock storage for testing AgentSession DO outside Wrangler
 class MockStorage {
@@ -329,4 +337,189 @@ test('10. Transparency: ondocs proof failure records failed SYSTEM entry without
   assert.ok(failedProofEntry, 'ondocs proof failure must be honestly recorded in ledger');
   assert.equal(failedProofEntry.units, 0, 'Proof failure must not deduct quota');
   assert.equal(state.quota.rpc.remaining, 5, 'Quota must remain intact');
+});
+
+test('11. Brain Economic Deliberation: valid JSON within cap transitions to awaiting_purchase with 0 spend', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_deliberate_valid',
+      quota: { rpc: { total: 5, remaining: 0, consumed: 5 } },
+      budgetCapUsd: 5.00
+    })
+  }));
+
+  const mockAdapter = {
+    chat: async () => ({
+      text: JSON.stringify({
+        action: 'buy',
+        item: 'rpc-1000',
+        rail: 'paypal',
+        estimated_cost_usd: 2.00,
+        estimated_calls_covered: 1000,
+        reasoning: 'Task is 60% complete with 400 RPC calls needed. rpc-1000 ($2.00 via PayPal) covers the remaining workload within the $5.00 budget cap with $3.00 margin remaining.',
+        alternative_considered: 'x402-rpc-micro was evaluated but would require 400 individual on-chain micro-transactions ($0.40 total), which incurs higher latency compared to a single PayPal volume pack.'
+      })
+    })
+  };
+  sessionDO.adapter = mockAdapter;
+
+  const deliberateRes = await sessionDO.fetch(new Request('https://do/deliberate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  }));
+
+  assert.equal(deliberateRes.status, 200);
+  const data = await deliberateRes.json();
+  assert.equal(data.success, true);
+  assert.equal(data.decision.action, 'buy');
+  assert.equal(data.decision.item, 'rpc-1000');
+  assert.equal(data.decision.guardrailStatus, 'accepted');
+  assert.equal(data.sessionStatus, SessionStatus.AWAITING_PURCHASE);
+
+  // Verify DO State: spentUsd MUST be 0 (Zero charges today per §0)
+  const stateRes = await sessionDO.fetch(new Request('https://do/state'));
+  const state = await stateRes.json();
+  assert.equal(state.status, SessionStatus.AWAITING_PURCHASE);
+  assert.equal(state.spentUsd, 0, 'ZERO charges must occur today; spentUsd must remain 0.00');
+
+  // Verify Ledger: DECISION entry exists with lean fields
+  const decisionEntry = state.ledger.find(e => e.type === LedgerType.DECISION);
+  assert.ok(decisionEntry, 'Decision entry must be recorded in ledger');
+  assert.equal(decisionEntry.item, 'rpc-1000');
+  assert.equal(decisionEntry.guardrailStatus, 'accepted');
+});
+
+test('12. Hard Guardrail 1 (Budget Cap): over-cap buy ($8.00 on $5.00 cap) rejected by code', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_deliberate_overcap',
+      quota: { rpc: { total: 5, remaining: 0, consumed: 5 } },
+      budgetCapUsd: 5.00
+    })
+  }));
+
+  const overCapAdapter = {
+    chat: async () => ({
+      text: JSON.stringify({
+        action: 'buy',
+        item: 'rpc-5000',
+        rail: 'paypal',
+        estimated_cost_usd: 8.00,
+        estimated_calls_covered: 5000,
+        reasoning: 'Proposing rpc-5000 for high buffer margin.',
+        alternative_considered: 'rpc-1000'
+      })
+    })
+  };
+  sessionDO.adapter = overCapAdapter;
+
+  const deliberateRes = await sessionDO.fetch(new Request('https://do/deliberate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  }));
+
+  const data = await deliberateRes.json();
+  assert.equal(data.success, true);
+  assert.equal(data.decision.guardrailStatus, 'rejected');
+  assert.match(data.decision.rejectionReason, /budget cap|Over-cap/i);
+  assert.equal(data.sessionStatus, SessionStatus.PAUSED_QUOTA_EXHAUSTED);
+
+  const state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  assert.notEqual(state.status, SessionStatus.AWAITING_PURCHASE);
+  assert.equal(state.spentUsd, 0);
+});
+
+test('13. Hard Guardrail 2 (Catalogue Allowlist): unlisted/invented item rejected by code', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_deliberate_unlisted',
+      budgetCapUsd: 5.00
+    })
+  }));
+
+  const unlistedAdapter = {
+    chat: async () => ({
+      text: JSON.stringify({
+        action: 'buy',
+        item: 'unlimited-super-pack',
+        rail: 'paypal',
+        estimated_cost_usd: 2.00,
+        estimated_calls_covered: 10000,
+        reasoning: 'Invented non-catalogue package.',
+        alternative_considered: 'None'
+      })
+    })
+  };
+  sessionDO.adapter = unlistedAdapter;
+
+  const deliberateRes = await sessionDO.fetch(new Request('https://do/deliberate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({})
+  }));
+
+  const data = await deliberateRes.json();
+  assert.equal(data.decision.guardrailStatus, 'rejected');
+  assert.match(data.decision.rejectionReason, /allowlist|live catalogue/i);
+  assert.equal(data.sessionStatus, SessionStatus.PAUSED_QUOTA_EXHAUSTED);
+});
+
+test('14. Brain Fail-Safe: malformed model prose with failed 1-retry repair safely fails to no_buy', async () => {
+  let callCount = 0;
+  const malformedAdapter = {
+    chat: async () => {
+      callCount++;
+      return {
+        text: 'I think the agent should really buy some more quota because we are nearly finished with the analysis.'
+      };
+    }
+  };
+
+  const brain = new Brain(malformedAdapter);
+  const decision = await brain.deliberate({
+    task: 'Test task',
+    budget_cap_usd: 5.00,
+    spent_usd: 0.00
+  });
+
+  // Verify 1 initial attempt + 1 repair attempt occurred
+  assert.equal(callCount, 2, 'Must attempt 1 initial prompt and exactly 1 repair retry');
+  assert.equal(decision.action, 'no_buy');
+  assert.equal(decision.guardrailStatus, 'rejected');
+  assert.match(decision.rejectionReason, /Malformed model output/i);
+  assert.equal(decision.nextSessionStatus, SessionStatus.PAUSED_QUOTA_EXHAUSTED);
+});
+
+test('15. Meta Model Compliance: zero occurrences of "contributor" across src/ and exact SPARK_MODEL', async () => {
+  // Check 1: Model constant is muse-spark-1.3
+  assert.equal(SPARK_MODEL, 'muse-spark-1.3', 'Model must be exact standard muse-spark-1.3');
+
+  // Check 2: Scan all files under src/ for forbidden variant 'contributor'
+  const srcDir = path.resolve(__dirname, '../src');
+  const files = fs.readdirSync(srcDir);
+  const violations = [];
+
+  for (const file of files) {
+    const fullPath = path.join(srcDir, file);
+    const stat = fs.statSync(fullPath);
+    if (stat.isFile()) {
+      const content = fs.readFileSync(fullPath, 'utf8');
+      if (content.toLowerCase().includes('contributor')) {
+        violations.push(file);
+      }
+    }
+  }
+
+  assert.equal(violations.length, 0, `Forbidden string 'contributor' found in src files: ${violations.join(', ')}`);
 });

@@ -10,7 +10,9 @@
  * - Real-time SSE broadcasting to connected dashboards
  */
 
-import { SessionStatus, LedgerType, INITIAL_DEMO_QUOTA } from './types.js';
+import { SessionStatus, LedgerType, INITIAL_DEMO_QUOTA, CATALOGUE_ALLOWLIST } from './types.js';
+import { Brain } from './brain.js';
+import { MetaModelAdapter } from './meta-adapter.js';
 
 export class AgentSession {
   constructor(state, env) {
@@ -63,6 +65,11 @@ export class AgentSession {
       if (action === 'update-servers' && req.method === 'POST') {
         const body = await req.json();
         return await this.handleUpdateServers(body.servers);
+      }
+
+      if (action === 'deliberate' && req.method === 'POST') {
+        const body = await req.json().catch(() => ({}));
+        return await this.handleDeliberate(body);
       }
 
       if (action === 'stream') {
@@ -355,6 +362,98 @@ export class AgentSession {
     this.broadcast('servers_updated', session.connectedServers);
 
     return new Response(JSON.stringify({ success: true, servers: session.connectedServers }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  /**
+   * Autonomous Economic Deliberation via Brain & Muse Spark
+   * Invoked at quota exhaustion. Evaluates pricing, applies hard code guardrails.
+   * Validated buy decisions end in 'awaiting_purchase'. ZERO charges occur today (§0).
+   */
+  async handleDeliberate(body = {}) {
+    const session = await this.getState();
+
+    if (session.isFrozen) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'SESSION_FROZEN',
+        message: 'Cannot deliberate: session is frozen by kill switch.'
+      }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    session.status = SessionStatus.DELIBERATING;
+    session.updated_at = new Date().toISOString();
+    await this.state.storage.put('session', session);
+    this.broadcast('status_changed', { status: SessionStatus.DELIBERATING, reason: 'Initiating economic deliberation with Muse Spark' });
+
+    // Build structured deliberation context
+    const context = {
+      task: session.task,
+      progress_percent: body.progress_percent ?? Math.min(100, Math.round((session.stepCount / 20) * 100) || 60),
+      completed_steps: session.stepCount,
+      quota_remaining: {
+        rpc: session.quota.rpc.remaining,
+        read: session.quota.read.remaining,
+        file: session.quota.file.remaining
+      },
+      quota_consumed: {
+        rpc: session.quota.rpc.consumed,
+        read: session.quota.read.consumed,
+        file: session.quota.file.consumed
+      },
+      budget_cap_usd: session.budgetCapUsd,
+      spent_usd: session.spentUsd,
+      session_spending_history: session.ledger.filter(l => l.type === LedgerType.TRANSACTION || l.type === LedgerType.DECISION),
+      tools_available: body.tools_available || ['skuuy_rpc', 'search'],
+      estimated_remaining_need: body.estimated_remaining_need || { rpc_calls: 400, note: 'Estimated remaining workload from unfinished task steps' }
+    };
+
+    let adapter = body.customAdapter || this.customAdapter || this.adapter || this.env?.adapter;
+    if (!adapter || typeof adapter.chat !== 'function') {
+      const apiKey = this.env?.META_MODEL_API_KEY || null;
+      adapter = new MetaModelAdapter({ apiKey });
+    }
+
+    const brain = new Brain(adapter);
+    const decision = await brain.deliberate(context);
+
+    // Save decision to ledger as a DECISION entry
+    const catalogueEntry = CATALOGUE_ALLOWLIST.find(c => c.item === decision.item);
+    const ledgerEntry = {
+      id: `ledg_${Date.now()}_decision`,
+      timestamp: new Date().toISOString(),
+      type: LedgerType.DECISION,
+      resource: catalogueEntry ? catalogueEntry.resource : null,
+      units: decision.estimated_calls_covered || 0,
+      costUsd: decision.estimated_cost_usd || 0,
+      rail: decision.rail || null,
+      action: decision.action,
+      item: decision.item,
+      reasoning: decision.reasoning,
+      alternativeConsidered: decision.alternative_considered || null,
+      guardrailStatus: decision.guardrailStatus,
+      rejectionReason: decision.rejectionReason,
+      status: decision.guardrailStatus === 'accepted' ? 'success' : 'failed'
+    };
+
+    session.ledger.push(ledgerEntry);
+    session.status = decision.nextSessionStatus;
+    session.latestDecision = decision;
+    session.updated_at = new Date().toISOString();
+
+    await this.state.storage.put('session', session);
+    this.broadcast('decision_made', { decision, ledgerEntry, sessionStatus: session.status });
+
+    return new Response(JSON.stringify({
+      success: true,
+      decision,
+      ledgerEntry,
+      sessionStatus: session.status
+    }), {
       headers: { 'Content-Type': 'application/json' }
     });
   }

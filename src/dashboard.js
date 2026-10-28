@@ -275,6 +275,45 @@ export function renderDashboardHTML(sessionId = 'default') {
       </div>
     </div>
 
+    <!-- Muse Spark Economic Deliberation Card -->
+    <div id="decision-card-container" style="display: none; background: #161b22; border: 2px solid var(--accent-cyan); border-radius: 12px; padding: 20px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 14px; font-weight: 800; color: var(--accent-cyan); text-transform: uppercase;">🧠 Muse Spark Economic Deliberation</span>
+          <span id="decision-guardrail-badge" class="status-badge" style="background: rgba(63, 185, 80, 0.2); color: var(--accent-green); border: 1px solid var(--accent-green);">Awaiting Purchase</span>
+        </div>
+        <span id="decision-timestamp" style="font-size: 11px; color: #8b949e; font-family: 'JetBrains Mono', monospace;"></span>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 12px; background: #090d13; padding: 12px; border-radius: 8px; border: 1px solid var(--border);">
+        <div>
+          <div style="font-size: 11px; color: #8b949e; text-transform: uppercase;">Proposed Action</div>
+          <div id="decision-action" style="font-size: 14px; font-weight: 800; color: var(--text-bright); font-family: 'JetBrains Mono', monospace;">—</div>
+        </div>
+        <div>
+          <div style="font-size: 11px; color: #8b949e; text-transform: uppercase;">Item & Rail</div>
+          <div id="decision-item-rail" style="font-size: 14px; font-weight: 800; color: var(--accent-cyan); font-family: 'JetBrains Mono', monospace;">—</div>
+        </div>
+        <div>
+          <div style="font-size: 11px; color: #8b949e; text-transform: uppercase;">Cost & Coverage</div>
+          <div id="decision-cost-coverage" style="font-size: 14px; font-weight: 800; color: var(--accent-green); font-family: 'JetBrains Mono', monospace;">—</div>
+        </div>
+      </div>
+
+      <div style="margin-bottom: 8px;">
+        <div style="font-size: 11px; font-weight: 800; color: #8b949e; text-transform: uppercase; margin-bottom: 4px;">Deliberation Rationale (Human Language):</div>
+        <div id="decision-reasoning" style="font-size: 13px; color: var(--text-bright); line-height: 1.6; background: #090d13; padding: 12px; border-radius: 8px; border: 1px solid var(--border);"></div>
+      </div>
+
+      <div id="decision-alt-wrap" style="font-size: 12px; color: #8b949e;">
+        <strong>Alternative Evaluated:</strong> <span id="decision-alt"></span>
+      </div>
+      
+      <div id="decision-rejection-wrap" style="display: none; margin-top: 8px; padding: 8px 12px; background: rgba(248, 81, 73, 0.15); border: 1px solid var(--accent-red); border-radius: 6px; color: var(--accent-red); font-size: 12px;">
+        <strong>Guardrail Rejection:</strong> <span id="decision-rejection-reason"></span>
+      </div>
+    </div>
+
     <div class="dashboard-grid">
       <!-- Live Execution Log & State -->
       <div class="log-panel">
@@ -355,6 +394,10 @@ export function renderDashboardHTML(sessionId = 'default') {
       fetchState();
     });
 
+    evtSource.addEventListener('decision_made', e => {
+      fetchState();
+    });
+
     evtSource.addEventListener('freeze_toggled', e => {
       fetchState();
     });
@@ -411,6 +454,16 @@ export function renderDashboardHTML(sessionId = 'default') {
         badge.classList.add('status-executing');
         badge.innerText = 'EXECUTING';
         document.getElementById('status-message').innerText = 'Consuming real RPC quota via skuuy-mcp tools...';
+      } else if (data.status === 'deliberating') {
+        badge.classList.add('status-paused');
+        badge.innerText = 'DELIBERATING';
+        document.getElementById('status-message').innerText = 'Muse Spark is evaluating workload, pricing catalog, and remaining budget...';
+      } else if (data.status === 'awaiting_purchase') {
+        badge.style.background = 'rgba(63, 185, 80, 0.2)';
+        badge.style.color = 'var(--accent-green)';
+        badge.style.border = '1px solid var(--accent-green)';
+        badge.innerText = 'AWAITING PURCHASE';
+        document.getElementById('status-message').innerText = 'Deliberation completed. Code guardrails PASSED. Ready for delegated mandate settlement.';
       } else if (data.status === 'paused_quota_exhausted') {
         badge.classList.add('status-paused');
         badge.innerText = 'PAUSED (EXHAUSTED)';
@@ -422,6 +475,44 @@ export function renderDashboardHTML(sessionId = 'default') {
       } else {
         badge.classList.add('status-idle');
         badge.innerText = data.status.toUpperCase();
+      }
+
+      // Render Decision Card
+      const dContainer = document.getElementById('decision-card-container');
+      if (data.latestDecision) {
+        dContainer.style.display = 'block';
+        const dec = data.latestDecision;
+        document.getElementById('decision-action').innerText = (dec.action || '—').toUpperCase();
+        document.getElementById('decision-item-rail').innerText = (dec.item || 'N/A') + ' (' + (dec.rail || 'NONE').toUpperCase() + ')';
+        document.getElementById('decision-cost-coverage').innerText = '$' + (dec.estimated_cost_usd || 0).toFixed(2) + ' (' + (dec.estimated_calls_covered || 0) + ' calls)';
+        document.getElementById('decision-reasoning').innerText = dec.reasoning || 'No rationale recorded.';
+        
+        const altWrap = document.getElementById('decision-alt-wrap');
+        if (dec.alternative_considered) {
+          altWrap.style.display = 'block';
+          document.getElementById('decision-alt').innerText = dec.alternative_considered;
+        } else {
+          altWrap.style.display = 'none';
+        }
+
+        const rejWrap = document.getElementById('decision-rejection-wrap');
+        const gBadge = document.getElementById('decision-guardrail-badge');
+        if (dec.guardrailStatus === 'rejected') {
+          gBadge.style.background = 'rgba(248, 81, 73, 0.2)';
+          gBadge.style.color = 'var(--accent-red)';
+          gBadge.style.border = '1px solid var(--accent-red)';
+          gBadge.innerText = 'GUARDRAIL REJECTED';
+          rejWrap.style.display = 'block';
+          document.getElementById('decision-rejection-reason').innerText = dec.rejectionReason || 'Policy check failed.';
+        } else {
+          gBadge.style.background = 'rgba(63, 185, 80, 0.2)';
+          gBadge.style.color = 'var(--accent-green)';
+          gBadge.style.border = '1px solid var(--accent-green)';
+          gBadge.innerText = 'GUARDRAIL VERIFIED';
+          rejWrap.style.display = 'none';
+        }
+      } else {
+        dContainer.style.display = 'none';
       }
 
       // Killswitch button state
