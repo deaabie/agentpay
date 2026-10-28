@@ -3,6 +3,10 @@ main = "src/index.js"
 compatibility_date = "2026-10-01"
 compatibility_flags = ["nodejs_compat"]
 
+routes = [
+  { pattern = "agentpay.skuuy.com", custom_domain = true }
+]
+
 [vars]
 ENVIRONMENT = "production"
 PUBLIC_BASE_URL = "https://agentpay.skuuy.com"
