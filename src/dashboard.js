@@ -172,6 +172,11 @@ export function renderDashboardHTML(sessionId = 'default') {
       color: var(--accent-green);
       border: 1px solid rgba(63, 185, 80, 0.4);
     }
+    .server-status-pill.error {
+      background: rgba(248, 81, 73, 0.15);
+      color: var(--accent-red);
+      border: 1px solid rgba(248, 81, 73, 0.4);
+    }
 
     /* Execution Log */
     .log-panel {
@@ -309,21 +314,7 @@ export function renderDashboardHTML(sessionId = 'default') {
         </div>
         
         <div id="servers-container">
-          <div class="server-item">
-            <div>
-              <div class="server-name">skuuy-mcp</div>
-              <div class="server-url">https://mcp.skuuy.com/mcp</div>
-            </div>
-            <span class="server-status-pill">16 Tools Live</span>
-          </div>
-
-          <div class="server-item">
-            <div>
-              <div class="server-name">ondocs</div>
-              <div class="server-url">https://ondocs.vercel.app/api/mcp</div>
-            </div>
-            <span class="server-status-pill">3 Tools Live</span>
-          </div>
+          <div style="color: #8b949e; font-size: 12px; padding: 12px; text-align: center;">Discovering MCP servers...</div>
         </div>
 
         <div style="margin-top: 16px; padding: 12px; background: #090d13; border-radius: 8px; border: 1px solid var(--border);">
@@ -346,6 +337,10 @@ export function renderDashboardHTML(sessionId = 'default') {
     evtSource.addEventListener('snapshot', e => {
       const data = JSON.parse(e.data);
       updateDashboard(data);
+    });
+
+    evtSource.addEventListener('servers_updated', e => {
+      fetchState();
     });
 
     evtSource.addEventListener('quota_deducted', e => {
@@ -371,7 +366,30 @@ export function renderDashboardHTML(sessionId = 'default') {
     }
 
     function updateDashboard(data) {
-      if (!data || !data.quota) return;
+      if (!data) return;
+
+      // Update connected servers dynamically from real state
+      const sContainer = document.getElementById('servers-container');
+      if (data.connectedServers && data.connectedServers.length > 0) {
+        sContainer.innerHTML = data.connectedServers.map(s => {
+          const isOk = s.status === 'connected';
+          const pillClass = isOk ? 'server-status-pill' : 'server-status-pill error';
+          const pillText = isOk
+            ? (s.toolsCount + ' Tools (' + (s.latencyMs || 0) + 'ms)')
+            : (s.error ? ('Error: ' + s.error.slice(0, 16)) : 'Disconnected');
+          return '<div class="server-item">' +
+            '<div>' +
+              '<div class="server-name">' + s.name + '</div>' +
+              '<div class="server-url">' + s.url + '</div>' +
+            '</div>' +
+            '<span class="' + pillClass + '">' + pillText + '</span>' +
+          '</div>';
+        }).join('');
+      } else {
+        sContainer.innerHTML = '<div style="color: #8b949e; font-size: 12px; padding: 12px; text-align: center;">No MCP servers registered.</div>';
+      }
+
+      if (!data.quota) return;
 
       // Update meters
       const rpc = data.quota.rpc;

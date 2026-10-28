@@ -64,7 +64,23 @@ export class AgentLoop {
         }
       } catch (err) {
         // ondocs failure must NEVER deduct quota and must NEVER halt the task
+        // But MUST record a transparent failed SYSTEM entry so failure is visible (§8)
         console.warn('[!] ondocs one-time proof shot non-blocking note:', err.message);
+        if (this.doStub) {
+          await this.doStub.fetch('https://do/add-ledger', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: LedgerType.SYSTEM,
+              resource: null,
+              units: 0,
+              costUsd: 0,
+              rail: null,
+              reasoning: `Multi-server generic MCP proof shot: ondocs unreachable (${err.message.slice(0, 100)}). Non-blocking, task continuing.`,
+              status: 'failed'
+            })
+          });
+        }
       }
     }
 
@@ -172,7 +188,32 @@ export class AgentLoop {
       toolResult = { success: false, error: err.message };
     }
 
-    // 5. Deduct quota atomically from DO
+    // If tool execution failed, DO NOT deduct quota (charge only on success)
+    if (!toolResult.success) {
+      await this.doStub.fetch('https://do/add-ledger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: LedgerType.USAGE,
+          resource: taskDef.resource,
+          units: 0,
+          costUsd: 0.00,
+          rail: 'free_tier',
+          reasoning: `${taskDef.desc} failed (${toolResult.error || 'MCP error'}). Zero quota deducted.`,
+          status: 'failed'
+        })
+      });
+
+      return {
+        halted: false,
+        step: taskDef.name,
+        status: SessionStatus.EXECUTING,
+        toolSuccess: false,
+        error: toolResult.error
+      };
+    }
+
+    // 5. Tool succeeded: deduct quota atomically from DO
     const deductRes = await this.doStub.fetch('https://do/deduct-quota', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -181,7 +222,7 @@ export class AgentLoop {
 
     const deductData = await deductRes.json();
 
-    // 6. Record zero-log spend ledger entry
+    // 6. Record zero-log spend ledger entry for successful execution
     await this.doStub.fetch('https://do/add-ledger', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -192,7 +233,7 @@ export class AgentLoop {
         costUsd: 0.00,
         rail: 'free_tier',
         reasoning: `${taskDef.desc} (MCP tool: ${taskDef.tool}, server: ${taskDef.server})`,
-        status: toolResult.success ? 'success' : 'failed'
+        status: 'success'
       })
     });
 

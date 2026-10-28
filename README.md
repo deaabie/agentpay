@@ -25,8 +25,8 @@ AI agents executing multi-step tasks often hit external API rate limits, RPC cei
            ┌─────────────────────────┼─────────────────────────┐
            ▼                         ▼                         ▼
    🧠 REASONING CORE         ✋ TOOL EXECUTION          💳 PAYMENT RAILS
-   Deliberates on task      Config-driven MCP client   PayPal Orders v2 &
-   progress & pricing       invoking runtime tools     x402 Base USDC
+   Meta Muse Spark          Config-driven MCP client   PayPal Orders v2 Vault
+   (muse-spark-1.3)         invoking runtime tools     & x402 Base USDC
 ```
 
 ---
@@ -34,19 +34,23 @@ AI agents executing multi-step tasks often hit external API rate limits, RPC cei
 ## How It Works
 
 1. **Task Initialization**: The operator provides a task description alongside a strict budget ceiling (e.g., $5.00). The session runtime initializes quota tracking across defined resource categories.
-2. **Execution & Metering**: The agent carries out task steps using standard Model Context Protocol (MCP) tool calls. Every execution atomically decrements the corresponding resource quota.
+2. **Execution & Metering**: The agent carries out task steps using standard Model Context Protocol (MCP) tool calls. Every execution atomically decrements the corresponding resource quota. Failed calls never deduct quota.
 3. **Exhaustion Guard**: When a resource reaches zero, execution pauses cleanly. The session coordinator verifies whether remaining workload warrants procurement.
-4. **Economic Deliberation**: The reasoning engine weighs remaining steps against live catalog prices (e.g., micro-units vs. volume packs) to select the optimal settlement rail.
+4. **Economic Deliberation**: The reasoning engine (**Meta Muse Spark `muse-spark-1.3`**) weighs remaining steps against live catalog prices (e.g., micro-units vs. volume packs) to select the optimal settlement rail.
 5. **Mandate Enforcement**: All purchases are validated against the operator's spending mandate (budget cap, authorized categories, maximum per-transaction limit) before execution.
-6. **Task Resumption**: Upon successful settlement and quota issuance, the agent immediately resumes work and generates an execution report.
+6. **Visual Receipting**: Each purchase is accompanied by a visual receipt card generated via **Meta Muse Image (`muse-image-1.0`)** and recorded in the audit trail.
+7. **Task Resumption**: Upon successful settlement and quota issuance, the agent immediately resumes work and generates an execution report.
 
 ---
 
 ## Architecture
 
-- **Session Coordinator**: A single-threaded, stateful actor providing authoritative state management, atomic quota decrement, and an owner-controlled emergency freeze mechanism.
-- **Config-Driven MCP Client**: Protocol-compliant (`2025-11-25`) Streamable HTTP client that dynamically discovers tools at runtime via `tools/list` across any configured endpoints.
-- **Dual Payment Rails**: Supports both fiat transactions (PayPal Orders v2) and autonomous on-chain micropayments (x402 USDC on Base).
+- **Session Coordinator**: A single-threaded, stateful actor (`AgentSession` Durable Object) providing authoritative state management, atomic quota decrement, and an owner-controlled emergency freeze mechanism.
+- **Reasoning Core**: Powered by Meta Muse Spark (`muse-spark-1.3`) for task planning, resource estimation, and economic deliberation.
+- **Config-Driven MCP Client**: Protocol-compliant (`2025-11-25`) Streamable HTTP client that dynamically discovers tools at runtime via `tools/list` across configured endpoints.
+- **Dual Payment Rails**:
+  - **PayPal Orders v2 & Vault Spending Mandate**: One-time delegation permitting autonomous settlement for quota packs without requiring human presence at each purchase.
+  - **x402 Base USDC**: Autonomous on-chain micropayment settlement.
 - **Zero-Log Spend Ledger**: Privacy-first financial auditing. Only transaction metadata (timestamps, units, costs, rails, rationale) is stored. Request payloads, response data, and file contents are never persisted.
 
 ---
@@ -58,17 +62,35 @@ MCP servers are configured via declarative endpoints. Tools are discovered dynam
 ```json
 [
   {
-    "name": "primary-tools",
+    "name": "skuuy-mcp",
     "url": "https://mcp.skuuy.com/mcp",
     "transport": "streamable-http"
   },
   {
-    "name": "reference-docs",
-    "url": "https://docs.example.com/api/mcp",
+    "name": "ondocs",
+    "url": "https://ondocs.vercel.app/api/mcp",
     "transport": "streamable-http"
   }
 ]
 ```
+
+---
+
+## Pre-existing Work Disclosure
+
+In accordance with hackathon guidelines, pre-existing and event-built components are delineated as follows:
+
+- **Pre-existing Work (Created prior to event)**:
+  - `skuuy-mcp`: Hosted developer utilities and JSON-RPC relay (`https://mcp.skuuy.com/mcp`).
+  - `checkout.skuuy.com`: Existing PayPal Orders v2 sandbox checkout rails and QuotaCoordinator.
+  - x402 Base USDC facilitator rails (`bc_c61pqqgo`).
+- **New Work Built During the Event (27 Oct – 4 Nov 2026)**:
+  - AgentPay core runtime and state machine (`AgentSession` Durable Object).
+  - Config-driven generic MCP client engine.
+  - Autonomous deliberation engine and economic prompt integration with Meta Muse Spark.
+  - PayPal Vault spending mandate verification and autonomous charge executor.
+  - Real-time telemetry dashboard and zero-log spend ledger.
+  - Receipt narrative and visual card generation pipeline via Meta Muse Image.
 
 ---
 
