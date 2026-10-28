@@ -52,7 +52,18 @@ export default {
     }
 
     // Diagnostic endpoint: live test Meta Model API directly with dummy prompt
+    // Gated: Requires ?demo=true to prevent unauthenticated crawler traffic (§Cleanup step 1)
     if (path === '/api/test-spark') {
+      const isDemo = url.searchParams.get('demo') === 'true' || env.ENABLE_TEST_SPARK === 'true';
+      if (!isDemo) {
+        return new Response(JSON.stringify({
+          error: 'Diagnostic endpoint gated. Pass ?demo=true to execute live sanity test.'
+        }), {
+          status: 403,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
       try {
         const apiKey = env.META_MODEL_API_KEY || null;
         if (!apiKey) {
@@ -177,6 +188,49 @@ export default {
       if (subpath === '/deliberate' && request.method === 'POST') {
         const body = await request.json().catch(() => ({}));
         const res = await doStub.fetch('https://do/deliberate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        return new Response(JSON.stringify(data), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      // POST /api/session/:id/plan (Trigger strategic planning)
+      if (subpath === '/plan' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const res = await doStub.fetch('https://do/plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        return new Response(JSON.stringify(data), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      // POST /api/session/:id/buy (Trigger autonomous buy settlement)
+      if (subpath === '/buy' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const res = await doStub.fetch('https://do/buy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        return new Response(JSON.stringify(data), {
+          status: res.status,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      // POST /api/session/:id/mandate (Set or update spending mandate)
+      if (subpath === '/mandate' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const res = await doStub.fetch('https://do/mandate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body)

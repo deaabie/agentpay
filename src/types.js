@@ -14,6 +14,9 @@ export const SessionStatus = {
   PAUSED_QUOTA_EXHAUSTED: 'paused_quota_exhausted',
   DELIBERATING: 'deliberating',
   AWAITING_PURCHASE: 'awaiting_purchase',
+  NEEDS_MANDATE_AMENDMENT: 'needs_mandate_amendment',
+  BUY_FAILED: 'buy_failed',
+  RESUMED: 'resumed',
   FROZEN_BY_KILLSWITCH: 'frozen_by_killswitch',
   COMPLETED: 'completed',
   ERROR: 'error'
@@ -51,6 +54,21 @@ export const INITIAL_DEMO_QUOTA = {
   rpc: { total: 100, remaining: 100, consumed: 0 },
   read: { total: 20, remaining: 20, consumed: 0 },
   file: { total: 5, remaining: 5, consumed: 0 }
+};
+
+export const PLATFORM_FREE_TIERS = {
+  read: { limit: 100, period: 'day/IP' },
+  file: { limit: 25, period: 'day/IP' },
+  rpc: { limit: 2500, period: 'day/IP' }
+};
+
+export const DEFAULT_MANDATE = {
+  budgetCapUsd: 5.00,
+  maxPerPurchaseUsd: 2.50,
+  allowedCategories: ['rpc', 'read', 'file', 'quota_packs'],
+  rail: 'paypal',
+  vaultToken: 'VAULT_SANDBOX_DELEGATION_MANDATE',
+  expiresAt: '2026-11-30T00:00:00.000Z'
 };
 
 /**

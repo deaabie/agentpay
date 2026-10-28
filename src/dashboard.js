@@ -234,9 +234,57 @@ export function renderDashboardHTML(sessionId = 'default') {
       <div class="task-inputs">
         <input type="text" id="task-input" value="Audit multi-chain smart contracts & wallet activity on Base and Ethereum">
         <div class="budget-pill">
-          <span>Delegated: $5.00</span>
+          <span id="budget-pill-text">Delegated: $5.00 | Spent: $0.00</span>
         </div>
         <button class="btn-primary" id="btn-run" onclick="runAgentTask()">▶ Run Agent Task</button>
+      </div>
+    </div>
+
+    <!-- Delegated Spending Mandate Policy Card -->
+    <div id="mandate-card" style="background: #161b22; border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 20px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 13px; font-weight: 800; color: var(--accent-yellow); text-transform: uppercase;">💳 Delegated Spending Mandate (Zero-Click Vault)</span>
+          <span id="mandate-status-badge" class="status-badge" style="background: rgba(63, 185, 80, 0.2); color: var(--accent-green); border: 1px solid var(--accent-green);">Active Policy</span>
+        </div>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: #8b949e; font-family: 'JetBrains Mono', monospace;">
+        <div>Budget Cap: <strong id="mandate-cap" style="color: var(--text-bright);">$5.00</strong></div>
+        <div>Max/Tx: <strong id="mandate-max-tx" style="color: var(--text-bright);">$2.50</strong></div>
+        <div>Rail: <strong id="mandate-rail" style="color: var(--accent-cyan);">PayPal Sandbox Vault</strong></div>
+        <div>Allowed: <strong id="mandate-categories" style="color: var(--text-bright);">API Quota Packs</strong></div>
+        <div>Policy Check: <span id="mandate-check-line" style="color: var(--accent-green); font-weight: 700;">PASS (All Guardrails Satisfied)</span></div>
+      </div>
+    </div>
+
+    <!-- Muse Spark Strategic Plan Card (§Part A) -->
+    <div id="plan-card-container" style="display: none; background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 18px; margin-bottom: 20px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 13px; font-weight: 800; color: #58a6ff; text-transform: uppercase;">📋 Strategic Plan (Muse Spark)</span>
+          <span id="plan-guardrail-badge" class="status-badge" style="background: rgba(88, 166, 255, 0.2); color: var(--accent-cyan); border: 1px solid var(--accent-cyan);">Advisory Verified</span>
+        </div>
+        <span id="plan-timestamp" style="font-size: 11px; color: #8b949e; font-family: 'JetBrains Mono', monospace;"></span>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 10px; background: #090d13; padding: 10px; border-radius: 8px; border: 1px solid var(--border);">
+        <div>
+          <div style="font-size: 10px; color: #8b949e; text-transform: uppercase;">Opening Strategy</div>
+          <div id="plan-strategy" style="font-size: 13px; font-weight: 800; color: var(--accent-green); font-family: 'JetBrains Mono', monospace;">—</div>
+        </div>
+        <div>
+          <div style="font-size: 10px; color: #8b949e; text-transform: uppercase;">Estimated Needs</div>
+          <div id="plan-calls" style="font-size: 13px; font-weight: 800; color: var(--accent-cyan); font-family: 'JetBrains Mono', monospace;">—</div>
+        </div>
+        <div>
+          <div style="font-size: 10px; color: #8b949e; text-transform: uppercase;">Estimated Upfront Cost</div>
+          <div id="plan-cost" style="font-size: 13px; font-weight: 800; color: var(--accent-yellow); font-family: 'JetBrains Mono', monospace;">—</div>
+        </div>
+      </div>
+
+      <div>
+        <div style="font-size: 11px; font-weight: 700; color: #8b949e; text-transform: uppercase; margin-bottom: 4px;">Strategic Reasoning (Muse Spark):</div>
+        <div id="plan-reasoning" style="font-size: 12px; color: var(--text-bright); line-height: 1.5; background: #090d13; padding: 10px; border-radius: 8px; border: 1px solid var(--border);"></div>
       </div>
     </div>
 
@@ -308,6 +356,15 @@ export function renderDashboardHTML(sessionId = 'default') {
 
       <div id="decision-alt-wrap" style="font-size: 12px; color: #8b949e;">
         <strong>Alternative Evaluated:</strong> <span id="decision-alt"></span>
+      </div>
+
+      <div id="decision-purchase-line" style="display: none; margin-top: 10px; padding: 10px 14px; background: rgba(63, 185, 80, 0.1); border: 1px solid var(--accent-green); border-radius: 8px; font-size: 12px; font-family: 'JetBrains Mono', monospace;">
+        <span style="color: var(--accent-green); font-weight: 700;">⚡ Autonomous Charge Executed:</span>
+        <span id="decision-purchase-desc" style="color: var(--text-bright);"></span>
+      </div>
+
+      <div id="decision-retry-wrap" style="display: none; margin-top: 10px;">
+        <button id="btn-retry-buy" class="btn-primary" style="background: #238636; font-size: 12px; padding: 8px 16px;" onclick="retryAutonomousBuy()">🔄 Retry Autonomous Settlement</button>
       </div>
       
       <div id="decision-rejection-wrap" style="display: none; margin-top: 8px; padding: 8px 12px; background: rgba(248, 81, 73, 0.15); border: 1px solid var(--accent-red); border-radius: 6px; color: var(--accent-red); font-size: 12px;">
@@ -435,6 +492,69 @@ export function renderDashboardHTML(sessionId = 'default') {
 
       if (!data.quota) return;
 
+      // Update budget pill
+      const bp = document.getElementById('budget-pill-text');
+      if (bp) {
+        bp.innerText = 'Delegated: $' + (data.budgetCapUsd || 5.00).toFixed(2) + ' | Spent: $' + (data.spentUsd || 0).toFixed(2);
+      }
+
+      // Update Plan Card
+      const pContainer = document.getElementById('plan-card-container');
+      if (data.latestPlan) {
+        pContainer.style.display = 'block';
+        const pl = data.latestPlan;
+        document.getElementById('plan-strategy').innerText = (pl.opening_strategy || 'free_tier_first').toUpperCase().replace(/_/g, ' ');
+        document.getElementById('plan-calls').innerText = (pl.estimated_rpc_calls || 0) + ' RPC (' + (pl.estimated_reads || 0) + ' Read)';
+        document.getElementById('plan-cost').innerText = '$' + (pl.estimated_cost_usd || 0).toFixed(2);
+        document.getElementById('plan-reasoning').innerText = pl.reasoning || 'No strategic rationale recorded.';
+
+        const pBadge = document.getElementById('plan-guardrail-badge');
+        if (pl.guardrailStatus === 'rejected-advisory' || pl.status === 'rejected') {
+          pBadge.style.background = 'rgba(241, 224, 90, 0.2)';
+          pBadge.style.color = 'var(--accent-yellow)';
+          pBadge.style.border = '1px solid var(--accent-yellow)';
+          pBadge.innerText = 'REJECTED-ADVISORY (FREE TIER FIRST)';
+        } else if (pl.guardrailStatus === 'fallback') {
+          pBadge.style.background = 'rgba(139, 148, 158, 0.2)';
+          pBadge.style.color = '#8b949e';
+          pBadge.style.border = '1px solid #8b949e';
+          pBadge.innerText = 'FALLBACK PLAN';
+        } else {
+          pBadge.style.background = 'rgba(88, 166, 255, 0.2)';
+          pBadge.style.color = 'var(--accent-cyan)';
+          pBadge.style.border = '1px solid var(--accent-cyan)';
+          pBadge.innerText = 'ADVISORY VERIFIED';
+        }
+      } else {
+        pContainer.style.display = 'none';
+      }
+
+      // Update Mandate Card
+      if (data.mandate) {
+        document.getElementById('mandate-cap').innerText = '$' + (data.mandate.budgetCapUsd || 5.00).toFixed(2);
+        document.getElementById('mandate-max-tx').innerText = '$' + (data.mandate.maxPerPurchaseUsd || 2.50).toFixed(2);
+        document.getElementById('mandate-rail').innerText = (data.mandate.rail === 'paypal' ? 'PayPal Sandbox Vault' : 'x402 Base USDC');
+        document.getElementById('mandate-categories').innerText = (data.mandate.allowedCategories || []).join(', ').toUpperCase();
+
+        const mCheckLine = document.getElementById('mandate-check-line');
+        const mBadge = document.getElementById('mandate-status-badge');
+        if (data.status === 'needs_mandate_amendment') {
+          mBadge.style.background = 'rgba(248, 81, 73, 0.2)';
+          mBadge.style.color = 'var(--accent-red)';
+          mBadge.style.border = '1px solid var(--accent-red)';
+          mBadge.innerText = 'AMENDMENT REQUIRED';
+          mCheckLine.style.color = 'var(--accent-red)';
+          mCheckLine.innerText = 'REJECTED: Policy check failed (Limit/Category exceeded). Loop paused.';
+        } else {
+          mBadge.style.background = 'rgba(63, 185, 80, 0.2)';
+          mBadge.style.color = 'var(--accent-green)';
+          mBadge.style.border = '1px solid var(--accent-green)';
+          mBadge.innerText = 'ACTIVE POLICY';
+          mCheckLine.style.color = 'var(--accent-green)';
+          mCheckLine.innerText = 'PASS (All 4 policy checks verified: Budget, Expiry, Category, Tx Cap)';
+        }
+      }
+
       // Update meters
       const rpc = data.quota.rpc;
       document.getElementById('rpc-remaining').innerText = rpc.remaining;
@@ -454,7 +574,11 @@ export function renderDashboardHTML(sessionId = 'default') {
       if (data.status === 'executing') {
         badge.classList.add('status-executing');
         badge.innerText = 'EXECUTING';
-        document.getElementById('status-message').innerText = 'Consuming real RPC quota via skuuy-mcp tools...';
+        document.getElementById('status-message').innerText = 'Executing multi-chain audit tasks via MCP tools...';
+      } else if (data.status === 'planning') {
+        badge.classList.add('status-paused');
+        badge.innerText = 'PLANNING';
+        document.getElementById('status-message').innerText = 'Muse Spark is formulating strategic task execution plan...';
       } else if (data.status === 'deliberating') {
         badge.classList.add('status-paused');
         badge.innerText = 'DELIBERATING';
@@ -465,6 +589,14 @@ export function renderDashboardHTML(sessionId = 'default') {
         badge.style.border = '1px solid var(--accent-green)';
         badge.innerText = 'AWAITING PURCHASE';
         document.getElementById('status-message').innerText = 'Deliberation completed. Code guardrails PASSED. Ready for delegated mandate settlement.';
+      } else if (data.status === 'needs_mandate_amendment') {
+        badge.classList.add('status-frozen');
+        badge.innerText = 'NEEDS AMENDMENT';
+        document.getElementById('status-message').innerText = 'Autonomous buy halted: Proposed purchase violates operator spending mandate limits.';
+      } else if (data.status === 'buy_failed') {
+        badge.classList.add('status-frozen');
+        badge.innerText = 'BUY FAILED';
+        document.getElementById('status-message').innerText = 'Autonomous settlement failed. Loop cleanly paused.';
       } else if (data.status === 'paused_quota_exhausted') {
         badge.classList.add('status-paused');
         badge.innerText = 'PAUSED (EXHAUSTED)';
@@ -494,6 +626,25 @@ export function renderDashboardHTML(sessionId = 'default') {
           document.getElementById('decision-alt').innerText = dec.alternative_considered;
         } else {
           altWrap.style.display = 'none';
+        }
+
+        // Purchase Line
+        const pLine = document.getElementById('decision-purchase-line');
+        const pDesc = document.getElementById('decision-purchase-desc');
+        const latestTx = (data.ledger || []).slice().reverse().find(l => l.type === 'transaction' && l.status === 'success');
+        if (latestTx) {
+          pLine.style.display = 'block';
+          pDesc.innerText = 'Captured $' + Number(latestTx.costUsd || 0).toFixed(2) + ' via ' + (latestTx.rail || 'paypal').toUpperCase() + ' (Sandbox Vault Ref: ' + (latestTx.reference || 'Verified') + ') | +' + latestTx.units + ' ' + (latestTx.resource || 'RPC').toUpperCase() + ' quota credited.';
+        } else {
+          pLine.style.display = 'none';
+        }
+
+        // Retry button
+        const retryWrap = document.getElementById('decision-retry-wrap');
+        if (data.status === 'buy_failed' || data.status === 'needs_mandate_amendment') {
+          retryWrap.style.display = 'block';
+        } else {
+          retryWrap.style.display = 'none';
         }
 
         const rejWrap = document.getElementById('decision-rejection-wrap');
@@ -529,16 +680,24 @@ export function renderDashboardHTML(sessionId = 'default') {
       // Update ledger
       if (data.ledger && data.ledger.length > 0) {
         const tbody = document.getElementById('ledger-body');
-        tbody.innerHTML = data.ledger.slice().reverse().map(item => \`
-          <tr>
+        tbody.innerHTML = data.ledger.slice().reverse().map(item => {
+          let typeColor = '#8b949e';
+          if (item.type === 'transaction') typeColor = 'var(--accent-green)';
+          else if (item.type === 'decision') typeColor = 'var(--accent-cyan)';
+          else if (item.type === 'system') typeColor = 'var(--accent-yellow)';
+
+          const costStr = Number(item.costUsd || 0) > 0 ? '$' + Number(item.costUsd).toFixed(2) : '$0.00';
+          const costColor = Number(item.costUsd || 0) > 0 ? 'var(--accent-green)' : '#8b949e';
+
+          return \`<tr>
             <td>\${item.timestamp.slice(11, 19)}</td>
-            <td><span style="color: #8b949e;">\${item.type}</span></td>
+            <td><span style="color: \${typeColor}; font-weight: \${item.type === 'transaction' ? '800' : 'bold'}; text-transform: uppercase;">\${item.type}</span></td>
             <td style="color: var(--accent-cyan);">\${item.resource || '—'}</td>
             <td>\${item.units}</td>
-            <td style="color: var(--accent-green);">$0.00</td>
+            <td style="color: \${costColor}; font-weight: bold;">\${costStr}</td>
             <td style="color: var(--text-bright);">\${item.reasoning || ''}</td>
-          </tr>
-        \`).join('');
+          </tr>\`;
+        }).join('');
       }
     }
 
@@ -571,6 +730,29 @@ export function renderDashboardHTML(sessionId = 'default') {
         btn.disabled = false;
         btn.innerText = '▶ Run Agent Task';
         fetchState();
+      }
+    }
+
+    async function retryAutonomousBuy() {
+      const btn = document.getElementById('btn-retry-buy');
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = 'Settling...';
+      }
+      try {
+        await fetch('/api/session/' + sessionId + '/buy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        await fetchState();
+      } catch (err) {
+        console.error('Buy retry error:', err);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '🔄 Retry Autonomous Settlement';
+        }
       }
     }
 

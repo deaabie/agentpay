@@ -7,6 +7,8 @@ import { AgentSession } from '../src/session-do.js';
 import { AgentLoop } from '../src/agent-loop.js';
 import { MCPClient } from '../src/mcp-client.js';
 import { Brain } from '../src/brain.js';
+import { Planner } from '../src/plan.js';
+import { BuyExecutor } from '../src/buy-executor.js';
 import { SPARK_MODEL, extractTextFromResponse } from '../src/meta-adapter.js';
 import { SessionStatus, LedgerType, DEFAULT_MCP_SERVERS } from '../src/types.js';
 
@@ -600,4 +602,326 @@ test('17. AgentSession DO: handleInit completely resets state, quota, and clears
   assert.equal(state.quota.rpc.remaining, 10, 'Quota must reset to new value');
   assert.equal(state.latestDecision, null, 'latestDecision must be cleared on reset');
   assert.equal(state.stepCount, 0, 'stepCount must reset to 0');
+});
+
+test('18. PLAN Valid: well-formed model reply produces stored DECISION entry labelled plan with 0 charge', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_plan_valid',
+      budgetCapUsd: 5.00
+    })
+  }));
+
+  const mockAdapter = {
+    chat: async () => ({
+      text: JSON.stringify({
+        steps: ['Query Base block height', 'Query Ethereum block height'],
+        estimated_rpc_calls: 400,
+        estimated_reads: 10,
+        estimated_cost_usd: 0.40,
+        opening_strategy: 'free_tier_first',
+        reasoning: 'Audit workload requires 400 RPC calls ($0.40 under micro or 0 on free tier). Opening strategy free_tier_first is optimal within $5.00 cap.'
+      })
+    })
+  };
+  sessionDO.adapter = mockAdapter;
+
+  const res = await sessionDO.fetch(new Request('https://do/plan', { method: 'POST', body: '{}' }));
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.equal(data.success, true);
+  assert.equal(data.plan.opening_strategy, 'free_tier_first');
+  assert.equal(data.plan.estimated_rpc_calls, 400);
+
+  // Verify DO State
+  const state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  assert.ok(state.latestPlan, 'Plan must be stored in state');
+  assert.equal(state.spentUsd, 0.00, 'PLAN must NEVER charge money (spentUsd must remain 0.00)');
+
+  // Verify Ledger: DECISION entry labelled plan
+  const planEntry = state.ledger.find(e => e.type === LedgerType.DECISION && e.action === 'plan');
+  assert.ok(planEntry, 'DECISION entry labelled plan must be in spend ledger');
+  assert.equal(planEntry.status, 'success');
+  assert.match(planEntry.reasoning, /400 RPC calls/i);
+});
+
+test('19. PLAN Fallback: malformed reply falls back to demo steps, loop runs, and exhaustion triggers DELIBERATE', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_plan_fallback',
+      quota: { rpc: { total: 2, remaining: 2, consumed: 0 } },
+      budgetCapUsd: 5.00
+    })
+  }));
+
+  let planCalls = 0;
+  const malformedAdapter = {
+    chat: async (messages) => {
+      // Check if this is a deliberate call or plan call
+      const isDeliberate = messages.some(m => m.content && m.content.includes('Deliberation Context'));
+      if (isDeliberate) {
+        return {
+          text: JSON.stringify({
+            action: 'no_buy',
+            item: null,
+            rail: null,
+            estimated_cost_usd: 0.00,
+            estimated_calls_covered: 0,
+            reasoning: 'Exhausted after 2 steps. Deliberating no_buy within $5.00 cap.',
+            alternative_considered: 'none'
+          })
+        };
+      }
+      // Otherwise it is PLAN: return invalid prose
+      planCalls++;
+      return { text: 'I am planning to audit the blockchain without JSON formatting.' };
+    }
+  };
+
+  const loop = new AgentLoop(sessionDO, DEFAULT_MCP_SERVERS, { customAdapter: malformedAdapter });
+  
+  // Run loop until pause
+  const loopResult = await loop.runUntilPause(10);
+
+  // Verify plan calls attempted initial + repair (2 calls)
+  assert.equal(planCalls, 2, 'PLAN must attempt 1 initial + 1 repair retry');
+
+  // Verify PLAN fallback entry exists
+  const state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  const planEntry = state.ledger.find(e => e.type === LedgerType.DECISION && e.action === 'plan');
+  assert.ok(planEntry, 'PLAN fallback entry must be recorded');
+  assert.equal(planEntry.status, 'failed');
+
+  // Verify DELIBERATE still triggered later on quota exhaustion
+  assert.equal(state.quota.rpc.remaining, 0, 'Quota must hit 0');
+  assert.ok(state.latestDecision, 'DELIBERATE must still trigger despite PLAN fallback');
+  assert.equal(state.latestDecision.action, 'no_buy');
+});
+
+test('20. BUY PayPal Success (Stubbed Vault): verified capture adds +1000 RPC, spent becomes $2.00, moves to EXECUTING', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_buy_paypal_success',
+      quota: { rpc: { total: 5, remaining: 0, consumed: 5 } },
+      budgetCapUsd: 5.00
+    })
+  }));
+
+  // Setup approved buy decision
+  const decision = {
+    id: 'dec_test_paypal_20',
+    action: 'buy',
+    item: 'rpc-1000',
+    rail: 'paypal',
+    estimated_cost_usd: 2.00,
+    estimated_calls_covered: 1000,
+    guardrailStatus: 'accepted'
+  };
+
+  let chargeCount = 0;
+  const mockPayPalClient = {
+    charge: async (params) => {
+      chargeCount++;
+      assert.equal(params.amount, 2.00);
+      assert.equal(params.item, 'rpc-1000');
+      return {
+        success: true,
+        captureId: 'CAP-SANDBOX-TEST-20',
+        status: 'COMPLETED',
+        note: 'Mock Sandbox Vault Capture'
+      };
+    }
+  };
+  sessionDO.paypalClient = mockPayPalClient;
+
+  const buyRes = await sessionDO.fetch(new Request('https://do/buy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      decision
+    })
+  }));
+
+  assert.equal(buyRes.status, 200);
+  const buyData = await buyRes.json();
+  assert.equal(buyData.success, true);
+  assert.equal(chargeCount, 1, 'Exactly 1 charge call must be made');
+  assert.equal(buyData.transaction.rail, 'paypal');
+
+  // Verify state updates
+  const state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  assert.equal(state.quota.rpc.remaining, 1000, 'Quota must be refilled by exactly +1000 RPC');
+  assert.equal(state.spentUsd, 2.00, 'spentUsd must increase to $2.00');
+  assert.equal(state.status, SessionStatus.EXECUTING, 'Session must transition to EXECUTING to resume');
+
+  // Verify TRANSACTION entry in ledger
+  const txEntry = state.ledger.find(e => e.type === LedgerType.TRANSACTION);
+  assert.ok(txEntry, 'TRANSACTION entry must be recorded in ledger');
+  assert.equal(txEntry.costUsd, 2.00);
+  assert.equal(txEntry.units, 1000);
+  assert.equal(txEntry.reference, 'CAP-SANDBOX-TEST-20');
+});
+
+test('21. BUY Re-check Rejection: changed price or cap-exceeding decision rejected with 0 charges', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_buy_recheck_fail',
+      budgetCapUsd: 1.50 // Budget cap is $1.50, but pack costs $2.00
+    })
+  }));
+
+  const overCapDecision = {
+    id: 'dec_overcap_21',
+    action: 'buy',
+    item: 'rpc-1000',
+    rail: 'paypal',
+    estimated_cost_usd: 2.00,
+    estimated_calls_covered: 1000,
+    guardrailStatus: 'accepted'
+  };
+
+  let chargeCount = 0;
+  const mockPayPalClient = {
+    charge: async () => {
+      chargeCount++;
+      return { success: true };
+    }
+  };
+
+  const buyRes = await sessionDO.fetch(new Request('https://do/buy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      decision: overCapDecision,
+      paypalClient: mockPayPalClient
+    })
+  }));
+
+  assert.equal(buyRes.status, 400);
+  const data = await buyRes.json();
+  assert.equal(data.success, false);
+  assert.match(data.reason, /exceeds cap/i);
+  assert.equal(chargeCount, 0, 'ZERO charges must occur on re-check rejection');
+
+  const state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  assert.equal(state.spentUsd, 0.00, 'spentUsd must remain 0.00');
+});
+
+test('22. BUY Idempotency: retrying the same decision id produces exactly 1 charge call and 1 transaction entry', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_buy_idempotent',
+      quota: { rpc: { total: 5, remaining: 0, consumed: 5 } },
+      budgetCapUsd: 5.00
+    })
+  }));
+
+  const decision = {
+    id: 'dec_idempotent_22',
+    action: 'buy',
+    item: 'rpc-1000',
+    rail: 'paypal',
+    estimated_cost_usd: 2.00,
+    estimated_calls_covered: 1000,
+    guardrailStatus: 'accepted'
+  };
+
+  let chargeCount = 0;
+  const mockPayPalClient = {
+    charge: async () => {
+      chargeCount++;
+      return {
+        success: true,
+        captureId: 'CAP-IDEMPOTENT-22',
+        status: 'COMPLETED'
+      };
+    }
+  };
+  sessionDO.paypalClient = mockPayPalClient;
+
+  // First Buy attempt
+  const buyRes1 = await sessionDO.fetch(new Request('https://do/buy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision })
+  }));
+  const data1 = await buyRes1.json();
+  assert.equal(data1.success, true);
+  assert.equal(chargeCount, 1);
+
+  // Second Buy attempt with same decision ID (e.g. page refresh / double click)
+  const buyRes2 = await sessionDO.fetch(new Request('https://do/buy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision })
+  }));
+  const data2 = await buyRes2.json();
+  assert.equal(data2.success, true);
+  assert.equal(data2.alreadyProcessed, true, 'Second call must be flagged as alreadyProcessed');
+  assert.equal(chargeCount, 1, 'Charge call must NOT be executed a second time');
+
+  // Verify ledger has exactly 1 TRANSACTION entry
+  const state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  const txEntries = state.ledger.filter(e => e.type === LedgerType.TRANSACTION);
+  assert.equal(txEntries.length, 1, 'Exactly 1 TRANSACTION entry must be recorded in ledger');
+  assert.equal(state.spentUsd, 2.00, 'spentUsd must remain $2.00 (not $4.00)');
+  assert.equal(state.quota.rpc.remaining, 1000, 'Quota must remain 1000 (not 2000)');
+});
+
+test('23. x402 Disabled Without Wallet: missing X402_PAYER_SECRET records failure without settlement, PayPal unaffected', async () => {
+  const sessionDO = createMockDO(); // no X402_PAYER_SECRET in env
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_x402_no_wallet',
+      budgetCapUsd: 5.00
+    })
+  }));
+
+  const x402Decision = {
+    id: 'dec_x402_micro_23',
+    action: 'buy',
+    item: 'x402-rpc-micro',
+    rail: 'x402',
+    estimated_cost_usd: 0.001,
+    estimated_calls_covered: 1,
+    guardrailStatus: 'accepted'
+  };
+
+  const buyRes = await sessionDO.fetch(new Request('https://do/buy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: x402Decision })
+  }));
+
+  assert.equal(buyRes.status, 400);
+  const data = await buyRes.json();
+  assert.equal(data.success, false);
+  assert.match(data.reason, /x402 wallet not configured/i);
+
+  // Verify state
+  const state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  assert.equal(state.status, SessionStatus.BUY_FAILED);
+  assert.equal(state.spentUsd, 0.00, 'Zero funds charged');
+  
+  // Verify failed transaction entry logged
+  const failedTx = state.ledger.find(e => e.type === LedgerType.TRANSACTION && e.status === 'failed');
+  assert.ok(failedTx, 'Failed transaction must be recorded in ledger');
+  assert.match(failedTx.reasoning, /x402 wallet not configured/i);
 });

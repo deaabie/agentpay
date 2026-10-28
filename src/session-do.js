@@ -10,8 +10,10 @@
  * - Real-time SSE broadcasting to connected dashboards
  */
 
-import { SessionStatus, LedgerType, INITIAL_DEMO_QUOTA, CATALOGUE_ALLOWLIST } from './types.js';
+import { SessionStatus, LedgerType, INITIAL_DEMO_QUOTA, CATALOGUE_ALLOWLIST, DEFAULT_MANDATE } from './types.js';
 import { Brain } from './brain.js';
+import { Planner } from './plan.js';
+import { BuyExecutor } from './buy-executor.js';
 import { MetaModelAdapter } from './meta-adapter.js';
 
 export class AgentSession {
@@ -72,6 +74,21 @@ export class AgentSession {
         return await this.handleDeliberate(body);
       }
 
+      if (action === 'plan' && req.method === 'POST') {
+        const body = await req.json().catch(() => ({}));
+        return await this.handlePlan(body);
+      }
+
+      if (action === 'buy' && req.method === 'POST') {
+        const body = await req.json().catch(() => ({}));
+        return await this.handleBuy(body);
+      }
+
+      if (action === 'mandate' && req.method === 'POST') {
+        const body = await req.json().catch(() => ({}));
+        return await this.handleMandate(body);
+      }
+
       if (action === 'stream') {
         return this.handleStream(req);
       }
@@ -101,6 +118,9 @@ export class AgentSession {
       isFrozen: false,
       stepCount: 0,
       latestDecision: null,
+      latestPlan: null,
+      mandate: body.mandate || JSON.parse(JSON.stringify(DEFAULT_MANDATE)),
+      transactions: [],
       quota: {
         rpc: {
           total: body.quota?.rpc?.total ?? INITIAL_DEMO_QUOTA.rpc.total,
@@ -158,6 +178,10 @@ export class AgentSession {
         status: SessionStatus.IDLE,
         isFrozen: false,
         stepCount: 0,
+        latestDecision: null,
+        latestPlan: null,
+        mandate: JSON.parse(JSON.stringify(DEFAULT_MANDATE)),
+        transactions: [],
         quota: JSON.parse(JSON.stringify(INITIAL_DEMO_QUOTA)),
         ledger: [],
         connectedServers: [],
@@ -413,7 +437,9 @@ export class AgentSession {
       estimated_remaining_need: body.estimated_remaining_need || { rpc_calls: 400, note: 'Estimated remaining workload from unfinished task steps' }
     };
 
-    let adapter = body.customAdapter || this.customAdapter || this.adapter || this.env?.adapter;
+    let adapter = (body.customAdapter && typeof body.customAdapter.chat === 'function')
+      ? body.customAdapter
+      : (this.customAdapter || this.adapter || this.env?.adapter);
     if (!adapter || typeof adapter.chat !== 'function') {
       const apiKey = this.env?.META_MODEL_API_KEY || null;
       adapter = new MetaModelAdapter({ apiKey });
@@ -453,6 +479,204 @@ export class AgentSession {
       success: true,
       decision,
       ledgerEntry,
+      sessionStatus: session.status
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  /**
+   * Strategic Planning via Muse Spark
+   * Runs at session init BEFORE EXECUTE. Advisory only: never buys, never charges.
+   */
+  async handlePlan(body = {}) {
+    const session = await this.getState();
+    session.status = SessionStatus.PLANNING;
+    session.updated_at = new Date().toISOString();
+    await this.state.storage.put('session', session);
+    this.broadcast('status_changed', { status: SessionStatus.PLANNING, reason: 'Developing strategic plan with Muse Spark' });
+
+    let adapter = (body.customAdapter && typeof body.customAdapter.chat === 'function')
+      ? body.customAdapter
+      : (this.customAdapter || this.adapter || this.env?.adapter);
+    if (!adapter || typeof adapter.chat !== 'function') {
+      const apiKey = this.env?.META_MODEL_API_KEY || null;
+      adapter = new MetaModelAdapter({ apiKey });
+    }
+
+    const planner = new Planner(adapter);
+    const plan = await planner.plan({
+      task: session.task,
+      budget_cap_usd: session.budgetCapUsd,
+      demo_quota: {
+        rpc: session.quota.rpc.total,
+        read: session.quota.read.total,
+        file: session.quota.file.total
+      },
+      tools_available: body.tools_available || ['skuuy_rpc', 'search']
+    });
+
+    const planLedgerEntry = {
+      id: `ledg_${Date.now()}_plan`,
+      timestamp: new Date().toISOString(),
+      type: LedgerType.DECISION,
+      resource: 'rpc',
+      units: plan.estimated_rpc_calls || 0,
+      costUsd: plan.estimated_cost_usd || 0,
+      rail: plan.opening_strategy === 'buy_pack_upfront' ? 'paypal' : null,
+      action: 'plan',
+      item: plan.pack_name || null,
+      reasoning: plan.reasoning,
+      guardrailStatus: plan.guardrailStatus,
+      rejectionReason: plan.rejectionReason,
+      status: plan.status === 'failed' ? 'failed' : 'success',
+      plan: {
+        steps: plan.steps,
+        estimated_rpc_calls: plan.estimated_rpc_calls,
+        estimated_reads: plan.estimated_reads,
+        estimated_cost_usd: plan.estimated_cost_usd,
+        opening_strategy: plan.opening_strategy,
+        reasoning: plan.reasoning
+      }
+    };
+
+    session.ledger.push(planLedgerEntry);
+    session.latestPlan = plan;
+    session.status = SessionStatus.IDLE;
+    session.updated_at = new Date().toISOString();
+    await this.state.storage.put('session', session);
+    this.broadcast('plan_made', { plan, ledgerEntry: planLedgerEntry });
+
+    return new Response(JSON.stringify({
+      success: true,
+      plan,
+      ledgerEntry: planLedgerEntry
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  /**
+   * Set or update delegated spending mandate policy
+   */
+  async handleMandate(body = {}) {
+    const session = await this.getState();
+    session.mandate = {
+      budgetCapUsd: Number(body.budgetCapUsd) || session.mandate?.budgetCapUsd || 5.00,
+      maxPerPurchaseUsd: Number(body.maxPerPurchaseUsd) || session.mandate?.maxPerPurchaseUsd || 2.50,
+      allowedCategories: body.allowedCategories || session.mandate?.allowedCategories || ['rpc', 'read', 'file', 'quota_packs'],
+      rail: body.rail || session.mandate?.rail || 'paypal',
+      vaultToken: body.vaultToken || session.mandate?.vaultToken || 'VAULT_SANDBOX_DELEGATION_MANDATE',
+      expiresAt: body.expiresAt || session.mandate?.expiresAt || '2026-11-30T00:00:00.000Z'
+    };
+
+    const mandateEntry = {
+      id: `ledg_${Date.now()}_mandate`,
+      timestamp: new Date().toISOString(),
+      type: LedgerType.SYSTEM,
+      resource: null,
+      units: 0,
+      costUsd: 0,
+      rail: session.mandate.rail,
+      reasoning: `Delegated spending mandate updated. Cap: $${session.mandate.budgetCapUsd.toFixed(2)}, Max/tx: $${session.mandate.maxPerPurchaseUsd.toFixed(2)}.`,
+      status: 'success'
+    };
+
+    session.ledger.push(mandateEntry);
+    session.updated_at = new Date().toISOString();
+    await this.state.storage.put('session', session);
+    this.broadcast('mandate_updated', session.mandate);
+
+    return new Response(JSON.stringify({ success: true, mandate: session.mandate }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  /**
+   * Autonomous Buy Settlement & Quota Issuance
+   * Converts a verified DELIBERATE decision into a real Sandbox/live charge
+   */
+  async handleBuy(body = {}) {
+    const session = await this.getState();
+
+    if (session.isFrozen) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'SESSION_FROZEN',
+        reason: 'Session is frozen by kill switch'
+      }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    const decision = body.decision || session.latestDecision;
+    if (!decision || decision.action !== 'buy') {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'NO_VALID_BUY_DECISION',
+        reason: 'No active approved buy decision available for settlement.'
+      }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    const paypalClient = (body.paypalClient && typeof body.paypalClient.charge === 'function')
+      ? body.paypalClient
+      : (this.paypalClient || this.env?.paypalClient);
+
+    const x402Client = (body.x402Client && typeof body.x402Client.charge === 'function')
+      ? body.x402Client
+      : (this.x402Client || this.env?.x402Client);
+
+    const executor = new BuyExecutor({
+      env: this.env,
+      paypalClient,
+      x402Client
+    });
+
+    const buyResult = await executor.executeBuy(session, decision);
+
+    if (!buyResult.success) {
+      session.status = buyResult.sessionStatus;
+      if (buyResult.transaction) {
+        session.ledger.push(buyResult.transaction);
+      }
+      session.updated_at = new Date().toISOString();
+      await this.state.storage.put('session', session);
+      this.broadcast('status_changed', { status: session.status, reason: buyResult.reason });
+
+      return new Response(JSON.stringify(buyResult), {
+        status: buyResult.sessionStatus === SessionStatus.NEEDS_MANDATE_AMENDMENT ? 403 : 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (buyResult.alreadyProcessed) {
+      return new Response(JSON.stringify(buyResult), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Process successful buy: refill quota, record ledger, increment spentUsd
+    session.ledger.push(buyResult.transaction);
+    if (!session.transactions) session.transactions = [];
+    session.transactions.push(buyResult.transaction);
+
+    session.spentUsd = Number((session.spentUsd + buyResult.chargedAmountUsd).toFixed(4));
+    session.quota[buyResult.resourceKey].remaining += buyResult.unitsToAdd;
+    session.quota[buyResult.resourceKey].total += buyResult.unitsToAdd;
+    session.status = SessionStatus.EXECUTING;
+    session.updated_at = new Date().toISOString();
+
+    await this.state.storage.put('session', session);
+    this.broadcast('buy_completed', {
+      transaction: buyResult.transaction,
+      spentUsd: session.spentUsd,
+      quota: session.quota,
+      sessionStatus: session.status
+    });
+
+    return new Response(JSON.stringify({
+      success: true,
+      transaction: buyResult.transaction,
+      spentUsd: session.spentUsd,
+      refilledQuota: session.quota,
       sessionStatus: session.status
     }), {
       headers: { 'Content-Type': 'application/json' }

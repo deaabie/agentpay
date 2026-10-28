@@ -25,6 +25,7 @@ export class AgentLoop {
     this.initialized = false;
     this.ondocsProofRan = false;
     this.deliberationRan = false;
+    this.planRan = false;
   }
 
   /**
@@ -32,6 +33,10 @@ export class AgentLoop {
    */
   async setup() {
     if (this.initialized) return;
+
+    if (this.customAdapter && this.doStub && !this.doStub.adapter) {
+      this.doStub.adapter = this.customAdapter;
+    }
 
     // Connect to all configured servers (skuuy-mcp + ondocs)
     const serverStatuses = await this.mcpClient.initializeAll();
@@ -84,6 +89,22 @@ export class AgentLoop {
             })
           });
         }
+      }
+    }
+
+    // Execute PLAN once before execute begins (§Part A)
+    if (!this.planRan && this.doStub) {
+      this.planRan = true;
+      try {
+        await this.doStub.fetch('https://do/plan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            customAdapter: this.customAdapter || null
+          })
+        });
+      } catch (planErr) {
+        console.warn('[!] Plan invocation note:', planErr.message);
       }
     }
 
@@ -243,6 +264,8 @@ export class AgentLoop {
     // 7. Check if quota exhausted after this call
     if (!deductData.success || deductData.status === SessionStatus.PAUSED_QUOTA_EXHAUSTED) {
       let deliberateResult = null;
+      let buyResult = null;
+
       if (!this.deliberationRan && this.doStub) {
         this.deliberationRan = true;
         try {
@@ -254,6 +277,34 @@ export class AgentLoop {
             })
           });
           deliberateResult = await dRes.json();
+
+          // Autonomous Buy Settlement Wiring (§Part B)
+          if (deliberateResult?.decision?.action === 'buy' && deliberateResult?.decision?.guardrailStatus === 'accepted') {
+            try {
+              const bRes = await this.doStub.fetch('https://do/buy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  decision: deliberateResult.decision
+                })
+              });
+              buyResult = await bRes.json();
+              if (buyResult.success) {
+                // Quota refilled! Reset deliberationRan so future exhaustion cycles can deliberate again
+                this.deliberationRan = false;
+                return {
+                  halted: false,
+                  resumed: true,
+                  reason: 'BUY_SUCCESS_QUOTA_REFILLED',
+                  status: SessionStatus.EXECUTING,
+                  refilledQuota: buyResult.refilledQuota,
+                  transaction: buyResult.transaction
+                };
+              }
+            } catch (buyErr) {
+              console.warn('[!] Buy invocation error:', buyErr.message);
+            }
+          }
         } catch (delibErr) {
           console.warn('[!] Deliberation invocation error:', delibErr.message);
         }
@@ -261,9 +312,10 @@ export class AgentLoop {
 
       return {
         halted: true,
-        reason: 'QUOTA_EXHAUSTED',
-        status: deliberateResult?.sessionStatus || SessionStatus.PAUSED_QUOTA_EXHAUSTED,
+        reason: buyResult ? (buyResult.reason || buyResult.error) : 'QUOTA_EXHAUSTED',
+        status: buyResult?.sessionStatus || deliberateResult?.sessionStatus || SessionStatus.PAUSED_QUOTA_EXHAUSTED,
         decision: deliberateResult?.decision || null,
+        buyResult: buyResult || null,
         step: taskDef.name,
         remaining: deductData.remaining
       };
