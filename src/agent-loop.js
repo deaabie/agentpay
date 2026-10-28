@@ -21,6 +21,7 @@ export class AgentLoop {
     this.doStub = doStub;
     this.mcpClient = new MCPClient(servers);
     this.initialized = false;
+    this.ondocsProofRan = false;
   }
 
   /**
@@ -39,6 +40,32 @@ export class AgentLoop {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ servers: serverStatuses })
       });
+    }
+
+    // Execute ondocs proof shot ONCE ONLY (§8 locked rule: never in loop cycles)
+    if (!this.ondocsProofRan) {
+      this.ondocsProofRan = true;
+      try {
+        await this.mcpClient.callTool('search', { query: 'getting started' });
+        if (this.doStub) {
+          await this.doStub.fetch('https://do/add-ledger', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: LedgerType.SYSTEM,
+              resource: null,
+              units: 0,
+              costUsd: 0,
+              rail: null,
+              reasoning: 'Verified multi-server generic MCP connectivity: ondocs discovery proof successful (read-only)',
+              status: 'success'
+            })
+          });
+        }
+      } catch (err) {
+        // ondocs failure must NEVER deduct quota and must NEVER halt the task
+        console.warn('[!] ondocs one-time proof shot non-blocking note:', err.message);
+      }
     }
 
     this.initialized = true;
@@ -72,19 +99,9 @@ export class AgentLoop {
       };
     }
 
-    // 2. Define real task steps
+    // 2. Define real task steps (pure RPC audit tasks, zero ondocs dependency in loop)
     // Multi-chain wallet & contract freshness audit
     const demoSteps = [
-      {
-        name: 'Verify generic documentation via ondocs MCP',
-        type: 'docs',
-        server: 'ondocs',
-        tool: 'search',
-        args: { query: 'getting started' },
-        resource: ResourceType.READ,
-        units: 1,
-        desc: 'Consulted ondocs MCP documentation for runtime specs'
-      },
       {
         name: 'Query Base latest block height',
         type: 'rpc',
@@ -126,7 +143,7 @@ export class AgentLoop {
         desc: 'Checked Vitalik wallet balance on Base'
       },
       {
-        name: 'Audit Coinbase Deployer balance on Base',
+        name: 'Audit 1inch router balance on Base',
         type: 'rpc',
         server: 'skuuy-mcp',
         tool: 'skuuy_rpc',

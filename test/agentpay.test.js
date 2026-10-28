@@ -229,3 +229,37 @@ test('7. AgentLoop v1 Integration: runs real task steps, consumes quota, pauses 
   assert.equal(runResult.finalStatus, SessionStatus.PAUSED_QUOTA_EXHAUSTED, 'Must pause upon exhaustion');
   assert.equal(runResult.quotaRemaining.rpc.remaining, 0, 'Quota remaining must be exactly 0');
 });
+
+test('8. ondocs ONCE-ONLY Rule (§8): proof runs once at setup and never cycles in task loop', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_ondocs_once',
+      quota: { rpc: { total: 5, remaining: 5 } }
+    })
+  }));
+
+  const loop = new AgentLoop(sessionDO, DEFAULT_MCP_SERVERS);
+  await loop.runUntilPause(5);
+
+  const stateRes = await sessionDO.fetch(new Request('https://do/state'));
+  const state = await stateRes.json();
+
+  // Filter ledger entries for ondocs
+  const ondocsEntries = state.ledger.filter(entry => 
+    entry.reasoning && entry.reasoning.includes('ondocs')
+  );
+
+  // Must be called exactly ONCE (proof shot), never in cycling steps
+  assert.equal(ondocsEntries.length, 1, 'ondocs must be called exactly once for proof, never cycling');
+  assert.equal(ondocsEntries[0].units, 0, 'ondocs proof call must not deduct quota');
+  assert.equal(ondocsEntries[0].type, LedgerType.SYSTEM, 'ondocs proof entry must be system type');
+
+  // Verify all usage entries are strictly RPC
+  const usageEntries = state.ledger.filter(entry => entry.type === LedgerType.USAGE);
+  for (const usage of usageEntries) {
+    assert.equal(usage.resource, 'rpc', 'All loop task steps must be pure RPC operations');
+  }
+});
