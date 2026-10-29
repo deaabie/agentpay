@@ -694,6 +694,7 @@ export class AgentSession {
 
     if (!buyResult.success) {
       session.status = buyResult.sessionStatus;
+      session.latestBuyReason = buyResult.reason || buyResult.error || null;
       if (buyResult.transaction) {
         session.ledger.push(buyResult.transaction);
       }

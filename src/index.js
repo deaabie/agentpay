@@ -226,9 +226,13 @@ export default {
               payment_source: {
                 paypal: {
                   usage_type: 'MERCHANT',
+                  customer_type: 'CONSUMER',
                   experience_context: {
+                    brand_name: 'AgentPay',
+                    locale: 'en-US',
                     return_url: returnUrl,
-                    cancel_url: cancelUrl
+                    cancel_url: cancelUrl,
+                    shipping_preference: 'NO_SHIPPING'
                   }
                 }
               }
@@ -237,11 +241,25 @@ export default {
 
           const setupData = await setupRes.json();
           if (!setupRes.ok || !setupData.id) {
+            const detailsText = Array.isArray(setupData.details)
+              ? setupData.details.map(d => `${d.issue || 'ISSUE'}: ${d.description || ''}`).join('; ')
+              : '';
+            const errorParts = [
+              setupData.name || 'ERROR',
+              setupData.message || '',
+              detailsText ? `[Details: ${detailsText}]` : '',
+              setupData.debug_id ? `[debug_id: ${setupData.debug_id}]` : ''
+            ].filter(Boolean).join(' - ');
+
             return new Response(JSON.stringify({
               success: false,
               error: 'PAYPAL_SETUP_TOKEN_FAILED',
               paypalStatus: setupRes.status,
-              paypalError: setupData.name || setupData.message || JSON.stringify(setupData)
+              paypalError: errorParts,
+              name: setupData.name || null,
+              message: setupData.message || null,
+              debug_id: setupData.debug_id || null,
+              details: setupData.details || null
             }), {
               status: setupRes.status >= 400 && setupRes.status < 600 ? setupRes.status : 502,
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }

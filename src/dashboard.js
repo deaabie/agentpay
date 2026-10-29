@@ -593,7 +593,9 @@ export function renderDashboardHTML(sessionId = 'default') {
           mBadge.style.border = '1px solid var(--accent-red)';
           mBadge.innerText = 'AMENDMENT REQUIRED';
           mCheckLine.style.color = 'var(--accent-red)';
-          mCheckLine.innerText = 'REJECTED: ' + (data.latestDecision?.rejectionReason || 'Mandate check failed (Limit/Category exceeded or missing token). Loop paused.');
+          const failedTx = (data.ledger || []).slice().reverse().find(l => l.type === 'transaction' && l.status === 'failed');
+          const failReason = failedTx?.reasoning || data.latestBuyReason || data.latestDecision?.rejectionReason || 'MANDATE_MISSING: No active delegated PayPal vault token. Loop paused.';
+          mCheckLine.innerText = 'REJECTED: ' + failReason;
           if (authBtn) {
             authBtn.style.display = 'inline-block';
             authBtn.innerText = '⚡ Re-authorize with PayPal';

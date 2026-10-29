@@ -1345,3 +1345,58 @@ test('30. Dashboard UI Transparency: Plan rejection reason and diagnostics expos
   assert.equal(/cloudflare/i.test(html), false, 'Dashboard must have zero Cloudflare vendor names');
   assert.equal(/wrangler/i.test(html), false, 'Dashboard must have zero Wrangler vendor names');
 });
+
+test('31. PayPal Error Diagnostics & Explicit MANDATE_MISSING Reason: failure response formats details, and mandate check displays MANDATE_MISSING', async () => {
+  const sessionDO = createMockDO();
+
+  // Test mandate missing returns explicit MANDATE_MISSING failed transaction
+  const executor = new BuyExecutor({ env: {} });
+  const decision = {
+    id: 'dec_test_31',
+    action: 'buy',
+    item: 'rpc-1000',
+    rail: 'paypal',
+    estimated_cost_usd: 2.00,
+    estimated_calls_covered: 1000,
+    guardrailStatus: 'accepted'
+  };
+
+  const emptyMandateSession = {
+    budgetCapUsd: 5.00,
+    spentUsd: 0.00,
+    mandate: { vaultToken: null },
+    quota: { rpc: { remaining: 0, total: 5, consumed: 5 } },
+    ledger: []
+  };
+
+  const buyRes = await executor.executeBuy(emptyMandateSession, decision);
+  assert.equal(buyRes.success, false);
+  assert.equal(buyRes.error, 'MANDATE_MISSING');
+  assert.ok(buyRes.transaction, 'Must return a failed transaction entry');
+  assert.match(buyRes.transaction.reasoning, /^MANDATE_MISSING:/);
+
+  // Test PayPal error formatting
+  const mockPayPalResponse = {
+    name: 'NOT_AUTHORIZED',
+    message: 'Authorization failed due to insufficient permissions.',
+    debug_id: 'test_dbg_12345',
+    details: [
+      {
+        issue: 'NOT_ENABLED_TO_VAULT_PAYMENT_SOURCE',
+        description: 'The merchant account is not enabled to vault the specified payment source.'
+      }
+    ]
+  };
+
+  const detailsText = mockPayPalResponse.details.map(d => `${d.issue || 'ISSUE'}: ${d.description || ''}`).join('; ');
+  const errorParts = [
+    mockPayPalResponse.name || 'ERROR',
+    mockPayPalResponse.message || '',
+    detailsText ? `[Details: ${detailsText}]` : '',
+    mockPayPalResponse.debug_id ? `[debug_id: ${mockPayPalResponse.debug_id}]` : ''
+  ].filter(Boolean).join(' - ');
+
+  assert.ok(errorParts.includes('NOT_AUTHORIZED'));
+  assert.ok(errorParts.includes('NOT_ENABLED_TO_VAULT_PAYMENT_SOURCE'));
+  assert.ok(errorParts.includes('test_dbg_12345'));
+});

@@ -117,20 +117,46 @@ export class BuyExecutor {
     if (decision.rail === 'paypal') {
       const token = mandate._vaultToken || mandate.vaultToken;
       if (!token) {
+        const failedTx = {
+          id: `tx_${Date.now()}_mandate_missing`,
+          decisionId: decision.id,
+          timestamp: new Date().toISOString(),
+          type: LedgerType.TRANSACTION,
+          resource: catalogueEntry?.resource || 'rpc',
+          units: 0,
+          costUsd: 0.00,
+          rail: decision.rail,
+          status: 'failed',
+          reasoning: 'MANDATE_MISSING: No PayPal Vault payment token authorized in delegated mandate. Autonomous buy halted safely.'
+        };
         return {
           success: false,
           error: 'MANDATE_MISSING',
-          reason: 'Mandate check failed: No active delegated PayPal vault token found for this session.',
+          reason: 'MANDATE_MISSING: No PayPal Vault payment token authorized in delegated mandate. Autonomous buy halted safely.',
+          transaction: failedTx,
           sessionStatus: SessionStatus.NEEDS_MANDATE_AMENDMENT
         };
       }
 
       // Reject placeholder tokens (fail closed, no fake mandates allowed)
       if (token === 'VAULT_SANDBOX_DELEGATION_MANDATE' || token.startsWith('VAULT_')) {
+        const failedTx = {
+          id: `tx_${Date.now()}_mandate_placeholder`,
+          decisionId: decision.id,
+          timestamp: new Date().toISOString(),
+          type: LedgerType.TRANSACTION,
+          resource: catalogueEntry?.resource || 'rpc',
+          units: 0,
+          costUsd: 0.00,
+          rail: decision.rail,
+          status: 'failed',
+          reasoning: 'MANDATE_TOKEN_PLACEHOLDER: Mandate token is a placeholder. Real PayPal Vault authorization is required. Autonomous buy halted safely.'
+        };
         return {
           success: false,
           error: 'MANDATE_TOKEN_PLACEHOLDER',
-          reason: 'Mandate check failed: Mandate token is a placeholder. A real PayPal Vault authorization is required.',
+          reason: 'MANDATE_TOKEN_PLACEHOLDER: Mandate token is a placeholder. A real PayPal Vault authorization is required.',
+          transaction: failedTx,
           sessionStatus: SessionStatus.NEEDS_MANDATE_AMENDMENT
         };
       }
