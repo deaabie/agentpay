@@ -1400,3 +1400,157 @@ test('31. PayPal Error Diagnostics & Explicit MANDATE_MISSING Reason: failure re
   assert.ok(errorParts.includes('NOT_ENABLED_TO_VAULT_PAYMENT_SOURCE'));
   assert.ok(errorParts.includes('test_dbg_12345'));
 });
+
+test('32. Order Creation Payload: uses PAYMENT_METHOD_TOKEN type with stored vaultToken', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedOrderPayload = null;
+
+  globalThis.fetch = async (url, options = {}) => {
+    const urlStr = String(url);
+    if (urlStr.includes('/v1/oauth2/token')) {
+      return {
+        ok: true,
+        json: async () => ({ access_token: 'mock_access_token_32' })
+      };
+    }
+    if (urlStr.includes('/v2/checkout/orders')) {
+      capturedOrderPayload = JSON.parse(options.body);
+      return {
+        ok: true,
+        json: async () => ({
+          id: 'ORDER-32-SUCCESS',
+          status: 'COMPLETED',
+          purchase_units: [{
+            payments: {
+              captures: [{
+                id: 'CAP-32-SUCCESS',
+                status: 'COMPLETED',
+                amount: { value: '2.00', currency_code: 'USD' }
+              }]
+            }
+          }]
+        })
+      };
+    }
+    return originalFetch(url, options);
+  };
+
+  try {
+    const executor = new BuyExecutor({
+      env: {
+        PAYPAL_CLIENT_ID: 'mock_client_id_32',
+        PAYPAL_CLIENT_SECRET: 'mock_client_secret_32'
+      }
+    });
+
+    const session = {
+      budgetCapUsd: 5.00,
+      spentUsd: 0.00,
+      mandate: {
+        vaultToken: 'PMT-VAULT-TOKEN-32-ABC',
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc', 'quota_packs'],
+        rail: 'paypal'
+      },
+      quota: { rpc: { remaining: 0, total: 5, consumed: 5 } },
+      ledger: []
+    };
+
+    const decision = {
+      id: 'dec_32',
+      action: 'buy',
+      item: 'rpc-1000',
+      rail: 'paypal',
+      estimated_cost_usd: 2.00,
+      estimated_calls_covered: 1000,
+      guardrailStatus: 'accepted'
+    };
+
+    const res = await executor.executeBuy(session, decision);
+    assert.equal(res.success, true);
+    assert.ok(capturedOrderPayload, 'Order payload must be sent');
+    assert.equal(capturedOrderPayload.payment_source?.token?.type, 'PAYMENT_METHOD_TOKEN', 'Must be PAYMENT_METHOD_TOKEN type');
+    assert.equal(capturedOrderPayload.payment_source?.token?.id, 'PMT-VAULT-TOKEN-32-ABC', 'Must match stored vault token');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('33. Charge Failure Reporting: captures full details, issue, description, and debug_id in ledger transaction', async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (url, options = {}) => {
+    const urlStr = String(url);
+    if (urlStr.includes('/v1/oauth2/token')) {
+      return {
+        ok: true,
+        json: async () => ({ access_token: 'mock_access_token_33' })
+      };
+    }
+    if (urlStr.includes('/v2/checkout/orders')) {
+      return {
+        ok: false,
+        status: 422,
+        json: async () => ({
+          name: 'UNPROCESSABLE_ENTITY',
+          message: 'The requested action could not be performed, semantically incorrect, or failed business validation.',
+          debug_id: 'dbg_9988112233',
+          details: [
+            {
+              issue: 'PAYMENT_SOURCE_CANNOT_BE_USED',
+              description: 'The provided payment method token cannot be charged.'
+            }
+          ]
+        })
+      };
+    }
+    return originalFetch(url, options);
+  };
+
+  try {
+    const executor = new BuyExecutor({
+      env: {
+        PAYPAL_CLIENT_ID: 'mock_client_id_33',
+        PAYPAL_CLIENT_SECRET: 'mock_client_secret_33'
+      }
+    });
+
+    const session = {
+      budgetCapUsd: 5.00,
+      spentUsd: 0.00,
+      mandate: {
+        vaultToken: 'PMT-REJECTED-TOKEN-33',
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc', 'quota_packs'],
+        rail: 'paypal'
+      },
+      quota: { rpc: { remaining: 0, total: 5, consumed: 5 } },
+      ledger: []
+    };
+
+    const decision = {
+      id: 'dec_33',
+      action: 'buy',
+      item: 'rpc-1000',
+      rail: 'paypal',
+      estimated_cost_usd: 2.00,
+      estimated_calls_covered: 1000,
+      guardrailStatus: 'accepted'
+    };
+
+    const res = await executor.executeBuy(session, decision);
+    assert.equal(res.success, false);
+    assert.equal(res.sessionStatus, SessionStatus.BUY_FAILED);
+    assert.ok(res.transaction, 'Failed transaction entry must be created');
+
+    const reasoning = res.transaction.reasoning;
+    assert.ok(reasoning.includes('UNPROCESSABLE_ENTITY'), 'Must include error name');
+    assert.ok(reasoning.includes('PAYMENT_SOURCE_CANNOT_BE_USED'), 'Must include issue');
+    assert.ok(reasoning.includes('The provided payment method token cannot be charged.'), 'Must include description');
+    assert.ok(reasoning.includes('dbg_9988112233'), 'Must include debug_id');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

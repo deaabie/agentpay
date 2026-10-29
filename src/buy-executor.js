@@ -355,13 +355,28 @@ export class BuyExecutor {
           payment_source: {
             token: {
               id: vaultToken,
-              type: 'BILLING_AGREEMENT'
+              type: 'PAYMENT_METHOD_TOKEN'
             }
           }
         })
       });
 
       const orderData = await orderRes.json();
+
+      const formatPayPalError = (data, defaultStatus) => {
+        if (!data || typeof data !== 'object') {
+          return `PayPal error with status: ${defaultStatus}`;
+        }
+        const detailsText = Array.isArray(data.details)
+          ? data.details.map(d => `${d.issue || 'ISSUE'}: ${d.description || ''}`).join('; ')
+          : '';
+        return [
+          data.name || 'ERROR',
+          data.message || '',
+          detailsText ? `[Details: ${detailsText}]` : '',
+          data.debug_id ? `[debug_id: ${data.debug_id}]` : ''
+        ].filter(Boolean).join(' - ');
+      };
 
       if (orderRes.ok && orderData.status === 'COMPLETED') {
         const capture = orderData.purchase_units?.[0]?.payments?.captures?.[0];
@@ -410,13 +425,13 @@ export class BuyExecutor {
 
         return {
           success: false,
-          error: capData.message || capData.name || `PayPal capture failed with status: ${capData.status || capRes.status}`
+          error: formatPayPalError(capData, capRes.status)
         };
       }
 
       return {
         success: false,
-        error: orderData.message || orderData.name || `PayPal order creation failed with status: ${orderRes.status}`
+        error: formatPayPalError(orderData, orderRes.status)
       };
     } catch (err) {
       return {
