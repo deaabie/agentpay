@@ -1169,3 +1169,179 @@ test('27. Mandate Token Masking: mandate returned to dashboard never contains fu
     assert.equal(entryStr.includes(fullToken), false, `Ledger entry ${entry.id} must not contain full token`);
   }
 });
+
+test('28. Plan and Deliberation Diagnostics: session stores structural metrics with zero secrets', async () => {
+  const sessionDO = createMockDO();
+
+  const planAdapter = {
+    async chat() {
+      return {
+        text: JSON.stringify({
+          steps: ['Audit contract 1', 'Audit contract 2'],
+          estimated_rpc_calls: 150,
+          estimated_reads: 0,
+          estimated_cost_usd: 0.00,
+          opening_strategy: 'free_tier_first',
+          pack_name: null,
+          reasoning: 'Plan estimated 150 RPC calls on free tier under $5.00 cap.'
+        }),
+        usage: { completion_tokens: 45, total_tokens: 180, reasoning_tokens: 85 },
+        diagnostic: {
+          http_status: 200,
+          content_type: 'string',
+          extracted_length: 220,
+          finish_reason: 'stop',
+          reasoning_tokens: 85,
+          completion_tokens: 45,
+          total_tokens: 180
+        }
+      };
+    }
+  };
+  sessionDO.adapter = planAdapter;
+
+  const planRes = await sessionDO.fetch(new Request('https://do/plan', {
+    method: 'POST',
+    body: '{}'
+  }));
+  const planData = await planRes.json();
+  assert.equal(planData.success, true);
+
+  const delibAdapter = {
+    async chat() {
+      return {
+        text: JSON.stringify({
+          action: 'buy',
+          item: 'rpc-1000',
+          rail: 'paypal',
+          estimated_cost_usd: 2.00,
+          estimated_calls_covered: 1000,
+          reasoning: 'Task is 25% complete. 150 RPC needed. rpc-1000 costs $2.00 within $5.00 cap.',
+          alternative_considered: 'x402 topups evaluated.'
+        }),
+        usage: { completion_tokens: 60, total_tokens: 220, reasoning_tokens: 110 },
+        diagnostic: {
+          http_status: 200,
+          content_type: 'string',
+          extracted_length: 260,
+          finish_reason: 'stop',
+          reasoning_tokens: 110,
+          completion_tokens: 60,
+          total_tokens: 220
+        }
+      };
+    }
+  };
+  sessionDO.adapter = delibAdapter;
+
+  const delibRes = await sessionDO.fetch(new Request('https://do/deliberate', {
+    method: 'POST',
+    body: '{}'
+  }));
+  const delibData = await delibRes.json();
+  assert.equal(delibData.success, true);
+
+  // Check state snapshot
+  const stateRes = await sessionDO.fetch(new Request('https://do/state'));
+  const state = await stateRes.json();
+
+  assert.ok(state.latestPlanDiagnostic, 'latestPlanDiagnostic must be present');
+  assert.equal(state.latestPlanDiagnostic.http_status, 200);
+  assert.equal(state.latestPlanDiagnostic.finish_reason, 'stop');
+  assert.equal(state.latestPlanDiagnostic.reasoning_tokens, 85);
+  assert.equal(state.latestPlanDiagnostic.parse_status, 'success');
+
+  assert.ok(state.latestDeliberateDiagnostic, 'latestDeliberateDiagnostic must be present');
+  assert.equal(state.latestDeliberateDiagnostic.http_status, 200);
+  assert.equal(state.latestDeliberateDiagnostic.finish_reason, 'stop');
+  assert.equal(state.latestDeliberateDiagnostic.reasoning_tokens, 110);
+  assert.equal(state.latestDeliberateDiagnostic.parse_status, 'success');
+});
+
+test('29. Dynamic Deliberation Context: progress % and remaining need derive from plan instead of hardcoded 400', async () => {
+  const sessionDO = createMockDO();
+
+  // Initialize session with 5 quota
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_dyn_context',
+      quota: { rpc: { total: 5, remaining: 5 } }
+    })
+  }));
+
+  // Store a plan estimating 200 RPC calls across 5 steps
+  const planAdapter = {
+    async chat() {
+      return {
+        text: JSON.stringify({
+          steps: ['Step 1', 'Step 2', 'Step 3', 'Step 4', 'Step 5'],
+          estimated_rpc_calls: 200,
+          estimated_reads: 0,
+          estimated_cost_usd: 0.00,
+          opening_strategy: 'free_tier_first',
+          pack_name: null,
+          reasoning: 'Plan 200 calls across 5 steps within $5.00 cap.'
+        })
+      };
+    }
+  };
+  sessionDO.adapter = planAdapter;
+
+  await sessionDO.fetch(new Request('https://do/plan', {
+    method: 'POST',
+    body: '{}'
+  }));
+
+  // Deduct 5 RPC units to trigger exhaustion
+  await sessionDO.fetch(new Request('https://do/deduct-quota', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resource: 'rpc', units: 5 })
+  }));
+
+  let capturedContext = null;
+  const capturingAdapter = {
+    async chat(messages) {
+      const userMsg = messages.find(m => m.role === 'user');
+      capturedContext = userMsg ? userMsg.content : null;
+      return {
+        text: JSON.stringify({
+          action: 'buy',
+          item: 'rpc-1000',
+          rail: 'paypal',
+          estimated_cost_usd: 2.00,
+          estimated_calls_covered: 1000,
+          reasoning: 'Progress is 25% with 0 remaining and 195 needed. Buying rpc-1000 via PayPal $2.00.',
+          alternative_considered: 'x402 topup evaluated.'
+        })
+      };
+    }
+  };
+  sessionDO.adapter = capturingAdapter;
+
+  await sessionDO.fetch(new Request('https://do/deliberate', {
+    method: 'POST',
+    body: '{}'
+  }));
+
+  assert.ok(capturedContext, 'Deliberation context must be delivered to model');
+  assert.equal(capturedContext.includes('"rpc_calls": 400'), false, 'Hardcoded 400 calls must NOT appear');
+  assert.equal(capturedContext.includes('"rpc_calls": 195'), true, 'Remaining need must be 200 - 5 = 195 calls');
+  assert.match(capturedContext, /"progress_percent":\s*(25|20|5)/, 'Progress percent must not be 100% on exhaustion');
+});
+
+test('30. Dashboard UI Transparency: Plan rejection reason and diagnostics exposed with zero vendor names', async () => {
+  const { renderDashboardHTML } = await import('../src/dashboard.js');
+  const html = renderDashboardHTML('test_ui_sess');
+
+  assert.ok(html.includes('id="plan-fallback-wrap"'), 'Must have plan-fallback-wrap element');
+  assert.ok(html.includes('id="plan-rejection-reason"'), 'Must have plan-rejection-reason element');
+  assert.ok(html.includes('id="plan-diagnostic-line"'), 'Must have plan-diagnostic-line element');
+  assert.ok(html.includes('id="decision-diagnostic-line"'), 'Must have decision-diagnostic-line element');
+
+  // Verify standing rule: zero vendor names
+  assert.equal(/cloudflare/i.test(html), false, 'Dashboard must have zero Cloudflare vendor names');
+  assert.equal(/wrangler/i.test(html), false, 'Dashboard must have zero Wrangler vendor names');
+});

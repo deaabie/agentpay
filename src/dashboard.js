@@ -290,6 +290,13 @@ export function renderDashboardHTML(sessionId = 'default') {
         <div style="font-size: 11px; font-weight: 700; color: #8b949e; text-transform: uppercase; margin-bottom: 4px;">Strategic Reasoning (Muse Spark):</div>
         <div id="plan-reasoning" style="font-size: 12px; color: var(--text-bright); line-height: 1.5; background: #090d13; padding: 10px; border-radius: 8px; border: 1px solid var(--border);"></div>
       </div>
+
+      <div id="plan-fallback-wrap" style="display: none; margin-top: 8px; padding: 8px 12px; background: rgba(248, 81, 73, 0.15); border: 1px solid var(--accent-red); border-radius: 6px; color: var(--accent-red); font-size: 12px; font-family: 'JetBrains Mono', monospace;">
+        <strong>Plan Rejection / Fallback:</strong> <span id="plan-rejection-reason"></span>
+      </div>
+      <div id="plan-diagnostic-line" style="display: none; margin-top: 6px; font-size: 11px; color: #8b949e; font-family: 'JetBrains Mono', monospace;">
+        <strong>Spark Diagnostic:</strong> <span id="plan-diagnostic-text"></span>
+      </div>
     </div>
 
     <!-- Quota Meters -->
@@ -373,6 +380,10 @@ export function renderDashboardHTML(sessionId = 'default') {
       
       <div id="decision-rejection-wrap" style="display: none; margin-top: 8px; padding: 8px 12px; background: rgba(248, 81, 73, 0.15); border: 1px solid var(--accent-red); border-radius: 6px; color: var(--accent-red); font-size: 12px;">
         <strong>Guardrail Rejection:</strong> <span id="decision-rejection-reason"></span>
+      </div>
+
+      <div id="decision-diagnostic-line" style="display: none; margin-top: 6px; font-size: 11px; color: #8b949e; font-family: 'JetBrains Mono', monospace;">
+        <strong>Spark Diagnostic:</strong> <span id="decision-diagnostic-text"></span>
       </div>
     </div>
 
@@ -513,6 +524,9 @@ export function renderDashboardHTML(sessionId = 'default') {
         document.getElementById('plan-reasoning').innerText = pl.reasoning || 'No strategic rationale recorded.';
 
         const pBadge = document.getElementById('plan-guardrail-badge');
+        const pRejWrap = document.getElementById('plan-fallback-wrap');
+        const pDiagLine = document.getElementById('plan-diagnostic-line');
+
         if (pl.guardrailStatus === 'rejected-advisory' || pl.status === 'rejected') {
           pBadge.style.background = 'rgba(241, 224, 90, 0.2)';
           pBadge.style.color = 'var(--accent-yellow)';
@@ -528,6 +542,28 @@ export function renderDashboardHTML(sessionId = 'default') {
           pBadge.style.color = 'var(--accent-cyan)';
           pBadge.style.border = '1px solid var(--accent-cyan)';
           pBadge.innerText = 'ADVISORY VERIFIED';
+        }
+
+        if (pl.rejectionReason && (pl.guardrailStatus === 'fallback' || pl.status === 'rejected')) {
+          pRejWrap.style.display = 'block';
+          document.getElementById('plan-rejection-reason').innerText = pl.rejectionReason;
+        } else {
+          pRejWrap.style.display = 'none';
+        }
+
+        if (data.latestPlanDiagnostic) {
+          pDiagLine.style.display = 'block';
+          const d = data.latestPlanDiagnostic;
+          document.getElementById('plan-diagnostic-text').innerText =
+            'HTTP ' + (d.http_status || '200') +
+            ' | finish: ' + (d.finish_reason || 'N/A') +
+            ' | reasoning_tokens: ' + (d.reasoning_tokens ?? 0) +
+            ' | completion_tokens: ' + (d.completion_tokens ?? 0) +
+            ' | attempt: ' + (d.attempt || 1) +
+            ' | parse: ' + (d.parse_status || 'success') +
+            (d.parse_error ? ' (' + d.parse_error + ')' : '');
+        } else {
+          pDiagLine.style.display = 'none';
         }
       } else {
         pContainer.style.display = 'none';
@@ -694,6 +730,22 @@ export function renderDashboardHTML(sessionId = 'default') {
           gBadge.style.border = '1px solid var(--accent-green)';
           gBadge.innerText = 'GUARDRAIL VERIFIED';
           rejWrap.style.display = 'none';
+        }
+
+        const dDiagLine = document.getElementById('decision-diagnostic-line');
+        if (data.latestDeliberateDiagnostic) {
+          dDiagLine.style.display = 'block';
+          const dd = data.latestDeliberateDiagnostic;
+          document.getElementById('decision-diagnostic-text').innerText =
+            'HTTP ' + (dd.http_status || '200') +
+            ' | finish: ' + (dd.finish_reason || 'N/A') +
+            ' | reasoning_tokens: ' + (dd.reasoning_tokens ?? 0) +
+            ' | completion_tokens: ' + (dd.completion_tokens ?? 0) +
+            ' | attempt: ' + (dd.attempt || 1) +
+            ' | parse: ' + (dd.parse_status || 'success') +
+            (dd.parse_error ? ' (' + dd.parse_error + ')' : '');
+        } else {
+          dDiagLine.style.display = 'none';
         }
       } else {
         dContainer.style.display = 'none';

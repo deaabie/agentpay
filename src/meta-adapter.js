@@ -52,6 +52,11 @@ export function extractTextFromResponse(data) {
       if (typeof msg.text === 'string' && msg.text.trim().length > 0) {
         return msg.text;
       }
+      // 4b. Reasoning content fallback: if content is empty or null, check if reasoning has a JSON block
+      const reasoning = msg.reasoning_content || msg.reasoning || msg.thought;
+      if (typeof reasoning === 'string' && reasoning.includes('{') && reasoning.includes('}')) {
+        return reasoning;
+      }
     }
 
     // 5. Completions text on choice
@@ -107,7 +112,7 @@ export class MetaModelAdapter {
         model: this.model,
         messages,
         temperature: params.temperature ?? 0.2,
-        max_tokens: params.max_tokens ?? 1024,
+        max_tokens: params.max_tokens ?? 4096,
         stream: false
       };
       if (withResponseFormat || params.response_format) {
@@ -144,12 +149,15 @@ export class MetaModelAdapter {
       throw new Error(`Meta API error HTTP ${res.status}: ${errorText}`);
     }
 
-    const data = await res.json();
+    let data = await res.json();
     let text = extractTextFromResponse(data);
+    let fallbackAttempted = false;
+    let fallbackSucceeded = false;
 
     // If text was empty despite HTTP 200, try fallback with response_format
     if (!text || text.trim().length === 0) {
       console.warn('[MetaModelAdapter] Empty content extracted on first format, attempting fallback payload...');
+      fallbackAttempted = true;
       try {
         const altRes = await fetch(`${this.baseUrl}/chat/completions`, {
           method: 'POST',
@@ -164,6 +172,8 @@ export class MetaModelAdapter {
           const altText = extractTextFromResponse(altData);
           if (altText && altText.trim().length > 0) {
             text = altText;
+            data = altData;
+            fallbackSucceeded = true;
           }
         }
       } catch (altErr) {
@@ -173,19 +183,21 @@ export class MetaModelAdapter {
 
     const choice0 = data.choices?.[0];
     const rawContent = choice0?.message?.content;
+    const usage = data.usage || {};
+    const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens ?? usage.reasoning_tokens ?? 0;
 
     // Server-side diagnostic log (structural only: NO secrets, NO full prompts)
     const diagnostic = {
-      status: res.status,
-      data_keys: Object.keys(data || {}),
-      choices_count: data.choices?.length ?? 0,
-      choice0_keys: choice0 ? Object.keys(choice0) : [],
-      choice0_finish_reason: choice0?.finish_reason ?? null,
-      message_keys: choice0?.message ? Object.keys(choice0.message) : [],
+      http_status: res.status,
       content_type: typeof rawContent,
       content_is_array: Array.isArray(rawContent),
       extracted_length: text.length,
-      usage: data.usage ?? null
+      finish_reason: choice0?.finish_reason ?? null,
+      reasoning_tokens: reasoningTokens,
+      completion_tokens: usage.completion_tokens ?? 0,
+      total_tokens: usage.total_tokens ?? 0,
+      fallback_attempted: fallbackAttempted,
+      fallback_succeeded: fallbackSucceeded
     };
 
     console.log('[MetaModelAdapter Diagnostic]', JSON.stringify(diagnostic));

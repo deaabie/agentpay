@@ -126,6 +126,8 @@ export class AgentSession {
       stepCount: 0,
       latestDecision: null,
       latestPlan: null,
+      latestPlanDiagnostic: null,
+      latestDeliberateDiagnostic: null,
       mandate,
       transactions: [],
       quota: {
@@ -187,6 +189,8 @@ export class AgentSession {
         stepCount: 0,
         latestDecision: null,
         latestPlan: null,
+        latestPlanDiagnostic: null,
+        latestDeliberateDiagnostic: null,
         mandate: JSON.parse(JSON.stringify(DEFAULT_MANDATE)),
         transactions: [],
         quota: JSON.parse(JSON.stringify(INITIAL_DEMO_QUOTA)),
@@ -422,10 +426,35 @@ export class AgentSession {
     await this.state.storage.put('session', session);
     this.broadcast('status_changed', { status: SessionStatus.DELIBERATING, reason: 'Initiating economic deliberation with Muse Spark' });
 
+    // Derive workload estimates from latest plan and consumed quota
+    const plannedRpc = session.latestPlan?.estimated_rpc_calls || 150;
+    const consumedRpc = session.quota?.rpc?.consumed || session.stepCount || 0;
+    
+    // Remaining need derived from plan minus consumed, ensuring minimum need if paused at 0
+    const remainingRpcNeed = Math.max(
+      session.quota.rpc.remaining === 0 ? 50 : 0,
+      plannedRpc - consumedRpc
+    );
+
+    // Calculate progress percentage accurately from actual execution vs plan
+    let progressPercent;
+    if (body.progress_percent !== undefined) {
+      progressPercent = Number(body.progress_percent);
+    } else if (session.latestPlan?.steps?.length) {
+      const totalSteps = Math.max(session.latestPlan.steps.length, Math.ceil(plannedRpc / 10));
+      progressPercent = Math.min(85, Math.round((session.stepCount / totalSteps) * 100));
+    } else {
+      progressPercent = Math.min(85, Math.round((consumedRpc / plannedRpc) * 100));
+    }
+    // Prevent false 100% progress when quota is exhausted and work remains
+    if (session.quota.rpc.remaining === 0 && progressPercent >= 100) {
+      progressPercent = 75;
+    }
+
     // Build structured deliberation context
     const context = {
       task: session.task,
-      progress_percent: body.progress_percent ?? Math.min(100, Math.round((session.stepCount / 20) * 100) || 60),
+      progress_percent: progressPercent,
       completed_steps: session.stepCount,
       quota_remaining: {
         rpc: session.quota.rpc.remaining,
@@ -441,7 +470,10 @@ export class AgentSession {
       spent_usd: session.spentUsd,
       session_spending_history: session.ledger.filter(l => l.type === LedgerType.TRANSACTION || l.type === LedgerType.DECISION),
       tools_available: body.tools_available || ['skuuy_rpc', 'search'],
-      estimated_remaining_need: body.estimated_remaining_need || { rpc_calls: 400, note: 'Estimated remaining workload from unfinished task steps' }
+      estimated_remaining_need: body.estimated_remaining_need || {
+        rpc_calls: remainingRpcNeed,
+        note: `Derived from plan (${plannedRpc} planned - ${consumedRpc} consumed)`
+      }
     };
 
     let adapter = (body.customAdapter && typeof body.customAdapter.chat === 'function')
@@ -477,6 +509,7 @@ export class AgentSession {
     session.ledger.push(ledgerEntry);
     session.status = decision.nextSessionStatus;
     session.latestDecision = decision;
+    session.latestDeliberateDiagnostic = decision._diagnostic || null;
     session.updated_at = new Date().toISOString();
 
     await this.state.storage.put('session', session);
@@ -549,6 +582,7 @@ export class AgentSession {
 
     session.ledger.push(planLedgerEntry);
     session.latestPlan = plan;
+    session.latestPlanDiagnostic = plan._diagnostic || null;
     session.status = SessionStatus.IDLE;
     session.updated_at = new Date().toISOString();
     await this.state.storage.put('session', session);

@@ -58,41 +58,59 @@ ${JSON.stringify({
     rail: c.rail
   })),
   tools_available: context.tools_available || ['skuuy_rpc', 'search'],
-  estimated_remaining_need: context.estimated_remaining_need || { rpc_calls: 400, note: 'Calculated from remaining steps' }
+  estimated_remaining_need: context.estimated_remaining_need || { rpc_calls: 150, note: 'Calculated from remaining steps' }
 }, null, 2)}
 
 Required Output JSON Schema:
+- action: "buy" | "no_buy" | "wait"
+- item: string or null (e.g. "rpc-1000" if buying)
+- rail: "paypal" | "x402" | null
+- estimated_cost_usd: number
+- estimated_calls_covered: number
+- reasoning: string (human language citing numbers: progress %, needed calls, cost comparison)
+- alternative_considered: string or null
+
+Example valid JSON output:
 {
-  "action": "buy" | "no_buy" | "wait",
-  "item": string | null,
-  "rail": "paypal" | "x402" | null,
-  "estimated_cost_usd": number,
-  "estimated_calls_covered": number,
-  "reasoning": "Human-readable reasoning citing numbers (progress %, needed calls, cost comparison)",
-  "alternative_considered": "Alternative pricing or rail evaluated and why it was rejected"
+  "action": "buy",
+  "item": "rpc-1000",
+  "rail": "paypal",
+  "estimated_cost_usd": 2.00,
+  "estimated_calls_covered": 1000,
+  "reasoning": "Task progress is 25% with 0 RPC remaining and approximately 150 calls needed. Purchasing rpc-1000 via PayPal for $2.00 is well within the $5.00 budget cap.",
+  "alternative_considered": "x402 micropayments were evaluated but volume pack offers superior unit economics."
 }`;
 
     let parsedDecision = null;
+    let attemptDiag = null;
+    let parseError = null;
+    let attemptCount = 1;
 
     // First attempt
     try {
       const response = await this.adapter.chat([
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
-      ]);
+      ], { max_tokens: 4096 });
+      attemptDiag = response.diagnostic || null;
       parsedDecision = this._parseAndValidateJSON(response.text);
     } catch (firstErr) {
       console.warn('[Brain Deliberation] First attempt failed:', firstErr.message);
+      parseError = firstErr.message;
+      attemptCount = 2;
       // Retry ONCE with a concise repair prompt (§3)
       try {
         const repairResponse = await this.adapter.chat([
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
-          { role: 'user', content: 'Return only the raw JSON object adhering to the schema, with no additional text or formatting.' }
-        ]);
+          { role: 'user', content: 'Return only a single raw valid JSON object adhering to the schema, with no conversational prose or markdown formatting.' }
+        ], { max_tokens: 4096 });
+        attemptDiag = repairResponse.diagnostic || null;
         parsedDecision = this._parseAndValidateJSON(repairResponse.text);
+        parseError = null;
       } catch (secondErr) {
         console.warn('[Brain Deliberation] Repair retry failed:', secondErr.message);
+        parseError = secondErr.message;
         // Fail-safe to no_buy on invalid output
         parsedDecision = {
           action: 'no_buy',
@@ -107,6 +125,21 @@ Required Output JSON Schema:
         };
       }
     }
+
+    const deliberateDiagnostic = {
+      http_status: attemptDiag?.http_status ?? null,
+      content_type: attemptDiag?.content_type ?? null,
+      extracted_length: attemptDiag?.extracted_length ?? 0,
+      finish_reason: attemptDiag?.finish_reason ?? null,
+      reasoning_tokens: attemptDiag?.reasoning_tokens ?? 0,
+      completion_tokens: attemptDiag?.completion_tokens ?? 0,
+      total_tokens: attemptDiag?.total_tokens ?? 0,
+      attempt: attemptCount,
+      parse_status: parseError ? 'failed' : 'success',
+      parse_error: parseError || null,
+      timestamp: new Date().toISOString()
+    };
+    parsedDecision._diagnostic = deliberateDiagnostic;
 
     // Apply Code Guardrails (§4)
     return this.applyGuardrails(parsedDecision, context);
@@ -190,13 +223,26 @@ Required Output JSON Schema:
       throw new Error('Empty model response');
     }
 
-    // Extract JSON block if wrapped in markdown
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error('No JSON object found in response');
+    let clean = text.trim();
+    if (clean.startsWith('```')) {
+      clean = clean.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
     }
 
-    const obj = JSON.parse(jsonMatch[0]);
+    let obj = null;
+    try {
+      obj = JSON.parse(clean);
+    } catch {
+      // Extract JSON block if wrapped in conversational prose or markdown
+      const jsonMatch = clean.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('No JSON object found in response');
+      }
+      try {
+        obj = JSON.parse(jsonMatch[0]);
+      } catch (jsonErr) {
+        throw new Error(`Invalid JSON syntax: ${jsonErr.message}`);
+      }
+    }
 
     if (!obj.action || !['buy', 'no_buy', 'wait'].includes(obj.action)) {
       throw new Error(`Invalid action: "${obj.action}"`);
