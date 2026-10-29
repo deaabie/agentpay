@@ -67,9 +67,18 @@ export const DEFAULT_MANDATE = {
   maxPerPurchaseUsd: 2.50,
   allowedCategories: ['rpc', 'read', 'file', 'quota_packs'],
   rail: 'paypal',
-  vaultToken: 'VAULT_SANDBOX_DELEGATION_MANDATE',
+  vaultToken: null,
   expiresAt: '2026-11-30T00:00:00.000Z'
 };
+
+/**
+ * Mask payment token for display and logs (last 4 characters only)
+ */
+export function maskVaultToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  if (token.length <= 4) return '****';
+  return `****${token.slice(-4)}`;
+}
 
 /**
  * Live Canonical Pricing Catalogue Allowlist

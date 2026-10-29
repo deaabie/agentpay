@@ -1,12 +1,14 @@
 /**
- * AgentPay Agent Loop v1 Task Executor
+ * AgentPay Agent Loop Task Executor
  * 
  * Executes real multi-chain tasks using generic MCP tools (skuuy-mcp & ondocs).
  * Consumes REAL RPC quota on each execution step.
  * 
- * Strict v1 Rule (§8):
+ * Execution & Autonomous Procurement Rules:
  * - At quota exhaustion (remaining === 0), loop PAUSES CLEANLY.
- * - DOES NOT BUY ANYTHING YET (economic deliberation & buy wiring are scheduled for 29-30 Oct).
+ * - Triggers economic deliberation via Meta Muse Spark (muse-spark-1.3).
+ * - Executes autonomous purchase settlement behind strict code-enforced spending mandate guardrails ($2.50 max/tx).
+ * - Refills quota from catalogue mapping and resumes execution automatically.
  */
 
 import { MCPClient } from './mcp-client.js';

@@ -245,16 +245,20 @@ export function renderDashboardHTML(sessionId = 'default') {
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
         <div style="display: flex; align-items: center; gap: 8px;">
           <span style="font-size: 13px; font-weight: 800; color: var(--accent-yellow); text-transform: uppercase;">💳 Delegated Spending Mandate (Zero-Click Vault)</span>
-          <span id="mandate-status-badge" class="status-badge" style="background: rgba(63, 185, 80, 0.2); color: var(--accent-green); border: 1px solid var(--accent-green);">Active Policy</span>
+          <span id="mandate-status-badge" class="status-badge" style="background: rgba(241, 224, 90, 0.2); color: var(--accent-yellow); border: 1px solid var(--accent-yellow);">NO MANDATE</span>
+        </div>
+        <div id="mandate-action-btn-container">
+          <button id="btn-auth-paypal" class="btn-primary" style="padding: 6px 14px; font-size: 12px; background: #0070ba; border: none; cursor: pointer; border-radius: 6px; font-weight: 700; color: #fff;" onclick="authorizePayPalSandbox()">⚡ Authorize with PayPal (Sandbox)</button>
         </div>
       </div>
       <div style="display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: #8b949e; font-family: 'JetBrains Mono', monospace;">
         <div>Budget Cap: <strong id="mandate-cap" style="color: var(--text-bright);">$5.00</strong></div>
         <div>Max/Tx: <strong id="mandate-max-tx" style="color: var(--text-bright);">$2.50</strong></div>
         <div>Rail: <strong id="mandate-rail" style="color: var(--accent-cyan);">PayPal Sandbox Vault</strong></div>
-        <div>Allowed: <strong id="mandate-categories" style="color: var(--text-bright);">API Quota Packs</strong></div>
-        <div>Policy Check: <span id="mandate-check-line" style="color: var(--accent-green); font-weight: 700;">PASS (All Guardrails Satisfied)</span></div>
+        <div>Token: <strong id="mandate-token-display" style="color: var(--text-bright);">None</strong></div>
+        <div>Policy Check: <span id="mandate-check-line" style="color: var(--accent-yellow); font-weight: 700;">No active mandate. Authorization required before autonomous buy.</span></div>
       </div>
+      <div id="mandate-error-msg" style="display: none; margin-top: 10px; padding: 8px 12px; background: rgba(248, 81, 73, 0.15); border: 1px solid var(--accent-red); border-radius: 6px; color: var(--accent-red); font-size: 12px; font-family: 'JetBrains Mono', monospace;"></div>
     </div>
 
     <!-- Muse Spark Strategic Plan Card (§Part A) -->
@@ -534,24 +538,52 @@ export function renderDashboardHTML(sessionId = 'default') {
         document.getElementById('mandate-cap').innerText = '$' + (data.mandate.budgetCapUsd || 5.00).toFixed(2);
         document.getElementById('mandate-max-tx').innerText = '$' + (data.mandate.maxPerPurchaseUsd || 2.50).toFixed(2);
         document.getElementById('mandate-rail').innerText = (data.mandate.rail === 'paypal' ? 'PayPal Sandbox Vault' : 'x402 Base USDC');
-        document.getElementById('mandate-categories').innerText = (data.mandate.allowedCategories || []).join(', ').toUpperCase();
 
         const mCheckLine = document.getElementById('mandate-check-line');
         const mBadge = document.getElementById('mandate-status-badge');
+        const tokenDisplay = document.getElementById('mandate-token-display');
+        const authBtn = document.getElementById('btn-auth-paypal');
+
+        const hasToken = data.mandate.vaultToken && data.mandate.vaultToken !== 'VAULT_SANDBOX_DELEGATION_MANDATE' && !data.mandate.vaultToken.startsWith('VAULT_');
+
+        if (tokenDisplay) {
+          tokenDisplay.innerText = hasToken ? data.mandate.vaultToken : 'None';
+          tokenDisplay.style.color = hasToken ? 'var(--accent-green)' : '#8b949e';
+        }
+
         if (data.status === 'needs_mandate_amendment') {
           mBadge.style.background = 'rgba(248, 81, 73, 0.2)';
           mBadge.style.color = 'var(--accent-red)';
           mBadge.style.border = '1px solid var(--accent-red)';
           mBadge.innerText = 'AMENDMENT REQUIRED';
           mCheckLine.style.color = 'var(--accent-red)';
-          mCheckLine.innerText = 'REJECTED: Policy check failed (Limit/Category exceeded). Loop paused.';
+          mCheckLine.innerText = 'REJECTED: ' + (data.latestDecision?.rejectionReason || 'Mandate check failed (Limit/Category exceeded or missing token). Loop paused.');
+          if (authBtn) {
+            authBtn.style.display = 'inline-block';
+            authBtn.innerText = '⚡ Re-authorize with PayPal';
+          }
+        } else if (!hasToken) {
+          mBadge.style.background = 'rgba(241, 224, 90, 0.2)';
+          mBadge.style.color = 'var(--accent-yellow)';
+          mBadge.style.border = '1px solid var(--accent-yellow)';
+          mBadge.innerText = 'NO MANDATE';
+          mCheckLine.style.color = 'var(--accent-yellow)';
+          mCheckLine.innerText = 'No authorized payment method. Authorization required before autonomous buy.';
+          if (authBtn) {
+            authBtn.style.display = 'inline-block';
+            authBtn.innerText = '⚡ Authorize with PayPal (Sandbox)';
+          }
         } else {
           mBadge.style.background = 'rgba(63, 185, 80, 0.2)';
           mBadge.style.color = 'var(--accent-green)';
           mBadge.style.border = '1px solid var(--accent-green)';
           mBadge.innerText = 'ACTIVE POLICY';
           mCheckLine.style.color = 'var(--accent-green)';
-          mCheckLine.innerText = 'PASS (All 4 policy checks verified: Budget, Expiry, Category, Tx Cap)';
+          mCheckLine.innerText = 'PASS (Mandate verified: Token active, Budget, Expiry, Category, Tx Cap)';
+          if (authBtn) {
+            authBtn.style.display = 'inline-block';
+            authBtn.innerText = '✓ Re-authorize Mandate';
+          }
         }
       }
 
@@ -756,6 +788,58 @@ export function renderDashboardHTML(sessionId = 'default') {
       }
     }
 
+    async function authorizePayPalSandbox() {
+      const btn = document.getElementById('btn-auth-paypal');
+      const errBox = document.getElementById('mandate-error-msg');
+      if (errBox) errBox.style.display = 'none';
+
+      if (btn) {
+        btn.disabled = true;
+        btn.innerText = '⏳ Contacting PayPal Sandbox...';
+      }
+
+      try {
+        const res = await fetch('/api/session/' + sessionId + '/mandate/setup-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await res.json();
+
+        if (!res.ok || !data.success) {
+          const errMsg = data.paypalError || data.message || data.error || 'Failed to create PayPal Setup Token';
+          if (errBox) {
+            errBox.innerText = 'PayPal Sandbox error: ' + errMsg;
+            errBox.style.display = 'block';
+          } else {
+            alert('PayPal Sandbox Error: ' + errMsg);
+          }
+          if (btn) {
+            btn.disabled = false;
+            btn.innerText = '⚡ Authorize with PayPal (Sandbox)';
+          }
+          return;
+        }
+
+        if (data.approveUrl) {
+          if (btn) btn.innerText = '↗ Redirecting to PayPal...';
+          window.location.href = data.approveUrl;
+        } else {
+          throw new Error('Approval URL missing from PayPal setup response');
+        }
+      } catch (err) {
+        if (errBox) {
+          errBox.innerText = 'Authorization error: ' + err.message;
+          errBox.style.display = 'block';
+        } else {
+          alert('Error: ' + err.message);
+        }
+        if (btn) {
+          btn.disabled = false;
+          btn.innerText = '⚡ Authorize with PayPal (Sandbox)';
+        }
+      }
+    }
+
     async function toggleKillSwitch() {
       await fetch('/api/session/' + sessionId + '/freeze', { method: 'POST' });
       fetchState();
@@ -822,6 +906,24 @@ export function renderDashboardHTML(sessionId = 'default') {
           }
         })
         .catch(() => {});
+    }
+
+    // Check for authorization callback notices
+    if (urlParams.get('mandate_authorized') === 'true') {
+      const errBox = document.getElementById('mandate-error-msg');
+      if (errBox) {
+        errBox.style.background = 'rgba(63, 185, 80, 0.15)';
+        errBox.style.border = '1px solid var(--accent-green)';
+        errBox.style.color = 'var(--accent-green)';
+        errBox.innerText = '✓ PayPal Vault spending mandate authorized successfully! Zero-click autonomous buy is now enabled.';
+        errBox.style.display = 'block';
+      }
+    } else if (urlParams.get('error')) {
+      const errBox = document.getElementById('mandate-error-msg');
+      if (errBox) {
+        errBox.style.display = 'block';
+        errBox.innerText = 'Authorization notice: ' + decodeURIComponent(urlParams.get('error'));
+      }
     }
 
     // Initial state fetch

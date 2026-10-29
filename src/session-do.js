@@ -10,7 +10,7 @@
  * - Real-time SSE broadcasting to connected dashboards
  */
 
-import { SessionStatus, LedgerType, INITIAL_DEMO_QUOTA, CATALOGUE_ALLOWLIST, DEFAULT_MANDATE } from './types.js';
+import { SessionStatus, LedgerType, INITIAL_DEMO_QUOTA, CATALOGUE_ALLOWLIST, DEFAULT_MANDATE, maskVaultToken } from './types.js';
 import { Brain } from './brain.js';
 import { Planner } from './plan.js';
 import { BuyExecutor } from './buy-executor.js';
@@ -39,7 +39,7 @@ export class AgentSession {
 
       if (action === 'state' && req.method === 'GET') {
         const state = await this.getState();
-        return new Response(JSON.stringify(state), {
+        return new Response(JSON.stringify(this._sanitizeSession(state)), {
           headers: { 'Content-Type': 'application/json' }
         });
       }
@@ -109,6 +109,13 @@ export class AgentSession {
    * Initialize or reset a session
    */
   async handleInit(body) {
+    let mandate = body.mandate ? JSON.parse(JSON.stringify(body.mandate)) : JSON.parse(JSON.stringify(DEFAULT_MANDATE));
+    if (mandate.vaultToken) {
+      const raw = mandate._vaultToken || mandate.vaultToken;
+      mandate._vaultToken = raw;
+      mandate.vaultToken = maskVaultToken(raw);
+    }
+
     const sessionData = {
       sessionId: body.sessionId || `sess_${Date.now()}`,
       task: body.task || 'Audit multi-chain smart contracts & wallet activity on Base and Ethereum',
@@ -119,7 +126,7 @@ export class AgentSession {
       stepCount: 0,
       latestDecision: null,
       latestPlan: null,
-      mandate: body.mandate || JSON.parse(JSON.stringify(DEFAULT_MANDATE)),
+      mandate,
       transactions: [],
       quota: {
         rpc: {
@@ -157,9 +164,9 @@ export class AgentSession {
     };
 
     await this.state.storage.put('session', sessionData);
-    this.broadcast('session_init', sessionData);
+    this.broadcast('session_init', this._sanitizeSession(sessionData));
 
-    return new Response(JSON.stringify({ success: true, session: sessionData }), {
+    return new Response(JSON.stringify({ success: true, session: this._sanitizeSession(sessionData) }), {
       headers: { 'Content-Type': 'application/json' }
     });
   }
@@ -561,12 +568,15 @@ export class AgentSession {
    */
   async handleMandate(body = {}) {
     const session = await this.getState();
+    const rawToken = body.vaultToken !== undefined ? body.vaultToken : (session.mandate?._vaultToken || session.mandate?.vaultToken || null);
+
     session.mandate = {
       budgetCapUsd: Number(body.budgetCapUsd) || session.mandate?.budgetCapUsd || 5.00,
       maxPerPurchaseUsd: Number(body.maxPerPurchaseUsd) || session.mandate?.maxPerPurchaseUsd || 2.50,
       allowedCategories: body.allowedCategories || session.mandate?.allowedCategories || ['rpc', 'read', 'file', 'quota_packs'],
       rail: body.rail || session.mandate?.rail || 'paypal',
-      vaultToken: body.vaultToken || session.mandate?.vaultToken || 'VAULT_SANDBOX_DELEGATION_MANDATE',
+      _vaultToken: rawToken,
+      vaultToken: rawToken ? maskVaultToken(rawToken) : null,
       expiresAt: body.expiresAt || session.mandate?.expiresAt || '2026-11-30T00:00:00.000Z'
     };
 
@@ -585,11 +595,27 @@ export class AgentSession {
     session.ledger.push(mandateEntry);
     session.updated_at = new Date().toISOString();
     await this.state.storage.put('session', session);
-    this.broadcast('mandate_updated', session.mandate);
+    const publicMandate = this._sanitizeSession(session).mandate;
+    this.broadcast('mandate_updated', publicMandate);
 
-    return new Response(JSON.stringify({ success: true, mandate: session.mandate }), {
+    return new Response(JSON.stringify({ success: true, mandate: publicMandate }), {
       headers: { 'Content-Type': 'application/json' }
     });
+  }
+
+  /**
+   * Remove sensitive fields (like private unmasked _vaultToken) before exposing session
+   */
+  _sanitizeSession(data) {
+    if (!data || typeof data !== 'object') return data;
+    const clone = JSON.parse(JSON.stringify(data));
+    if (clone.mandate && clone.mandate._vaultToken !== undefined) {
+      delete clone.mandate._vaultToken;
+    }
+    if (clone.session && clone.session.mandate && clone.session.mandate._vaultToken !== undefined) {
+      delete clone.session.mandate._vaultToken;
+    }
+    return clone;
   }
 
   /**
@@ -695,7 +721,7 @@ export class AgentSession {
 
     // Send initial snapshot
     this.getState().then(state => {
-      writer.write(encoder.encode(`event: snapshot\ndata: ${JSON.stringify(state)}\n\n`));
+      writer.write(encoder.encode(`event: snapshot\ndata: ${JSON.stringify(this._sanitizeSession(state))}\n\n`));
     }).catch(() => {});
 
     request.signal.addEventListener('abort', () => {

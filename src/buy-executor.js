@@ -104,13 +104,36 @@ export class BuyExecutor {
     // Check 2: Mandate Check (Guardrail #7)
     // =========================================================================
     const mandate = session.mandate;
-    if (!mandate || !mandate.vaultToken) {
+    if (!mandate) {
       return {
         success: false,
         error: 'MANDATE_MISSING',
         reason: 'Mandate check failed: No active delegated spending mandate found for this session.',
         sessionStatus: SessionStatus.NEEDS_MANDATE_AMENDMENT
       };
+    }
+
+    // For PayPal rail, require an authorized non-placeholder vault token
+    if (decision.rail === 'paypal') {
+      const token = mandate._vaultToken || mandate.vaultToken;
+      if (!token) {
+        return {
+          success: false,
+          error: 'MANDATE_MISSING',
+          reason: 'Mandate check failed: No active delegated PayPal vault token found for this session.',
+          sessionStatus: SessionStatus.NEEDS_MANDATE_AMENDMENT
+        };
+      }
+
+      // Reject placeholder tokens (fail closed, no fake mandates allowed)
+      if (token === 'VAULT_SANDBOX_DELEGATION_MANDATE' || token.startsWith('VAULT_')) {
+        return {
+          success: false,
+          error: 'MANDATE_TOKEN_PLACEHOLDER',
+          reason: 'Mandate check failed: Mandate token is a placeholder. A real PayPal Vault authorization is required.',
+          sessionStatus: SessionStatus.NEEDS_MANDATE_AMENDMENT
+        };
+      }
     }
 
     // 2a. Expiry
@@ -147,8 +170,8 @@ export class BuyExecutor {
       };
     }
 
-    // 2d. Max per purchase limit
-    const maxPerPurchase = Number(mandate.maxPerPurchaseUsd) || 5.00;
+    // 2d. Max per purchase limit ($2.50)
+    const maxPerPurchase = Number(mandate.maxPerPurchaseUsd) || 2.50;
     if (cost > maxPerPurchase) {
       return {
         success: false,
@@ -236,30 +259,29 @@ export class BuyExecutor {
 
   /**
    * Execute PayPal Vault Charge in Sandbox
+   * Fail closed: requires real keys, real token, and verified capture status COMPLETED.
    */
   async _chargePayPalVault(mandate, catalogueEntry, decision) {
+    const vaultToken = mandate._vaultToken || mandate.vaultToken;
+
     // If a custom or stubbed PayPal client is provided (e.g. in tests)
     if (this.paypalClient) {
       return await this.paypalClient.charge({
-        vaultToken: mandate.vaultToken,
+        vaultToken,
         amount: catalogueEntry.priceUsd,
         currency: 'USD',
         item: catalogueEntry.item
       });
     }
 
-    const clientId = this.env.PAYPAL_CLIENT_ID;
-    const clientSecret = this.env.PAYPAL_CLIENT_SECRET;
+    const clientId = this.env?.PAYPAL_CLIENT_ID;
+    const clientSecret = this.env?.PAYPAL_CLIENT_SECRET;
 
     if (!clientId || !clientSecret) {
-      // In sandbox demo mode without live PayPal keys, simulate approved sandbox capture
       return {
-        success: true,
-        captureId: `CAP-SANDBOX-${Date.now()}`,
-        status: 'COMPLETED',
-        amount: catalogueEntry.priceUsd.toFixed(2),
-        currency: 'USD',
-        note: 'PayPal Sandbox Orders v2 Vault Capture Verified'
+        success: false,
+        error: 'PAYPAL_KEYS_MISSING',
+        reason: 'PayPal client credentials missing (PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET not configured in Worker secrets).'
       };
     }
 
@@ -278,7 +300,10 @@ export class BuyExecutor {
       });
       const tokenData = await tokenRes.json();
       if (!tokenData.access_token) {
-        throw new Error('Failed to retrieve PayPal Sandbox access token');
+        return {
+          success: false,
+          error: tokenData.error_description || tokenData.error || 'Failed to retrieve PayPal Sandbox access token'
+        };
       }
 
       // 2. Create Order with vaulted token & idempotency key
@@ -303,7 +328,7 @@ export class BuyExecutor {
           }],
           payment_source: {
             token: {
-              id: mandate.vaultToken,
+              id: vaultToken,
               type: 'BILLING_AGREEMENT'
             }
           }
@@ -314,18 +339,23 @@ export class BuyExecutor {
 
       if (orderRes.ok && orderData.status === 'COMPLETED') {
         const capture = orderData.purchase_units?.[0]?.payments?.captures?.[0];
-        return {
-          success: true,
-          orderId: orderData.id,
-          captureId: capture?.id || orderData.id,
-          status: 'COMPLETED',
-          amount: capture?.amount?.value || catalogueEntry.priceUsd.toFixed(2),
-          currency: 'USD',
-          note: 'PayPal Sandbox Vault Orders v2'
-        };
+        const capturedAmount = Number(capture?.amount?.value);
+        const expectedAmount = Number(catalogueEntry.priceUsd.toFixed(2));
+
+        if (capture?.status === 'COMPLETED' && Math.abs(capturedAmount - expectedAmount) < 0.001 && capture?.id) {
+          return {
+            success: true,
+            orderId: orderData.id,
+            captureId: capture.id,
+            status: 'COMPLETED',
+            amount: capture.amount.value,
+            currency: 'USD',
+            note: 'PayPal Sandbox Orders v2 Vault Capture'
+          };
+        }
       }
 
-      // If status is not COMPLETED or token was a placeholder, verify and capture
+      // If status is not COMPLETED (e.g. APPROVED), capture the order
       if (orderRes.ok && orderData.id) {
         const capRes = await fetch(`${baseUrl}/v2/checkout/orders/${orderData.id}/capture`, {
           method: 'POST',
@@ -337,32 +367,30 @@ export class BuyExecutor {
         });
         const capData = await capRes.json();
         const capture = capData.purchase_units?.[0]?.payments?.captures?.[0];
-        return {
-          success: capData.status === 'COMPLETED',
-          orderId: orderData.id,
-          captureId: capture?.id || orderData.id,
-          status: capData.status,
-          amount: capture?.amount?.value || catalogueEntry.priceUsd.toFixed(2),
-          currency: 'USD',
-          note: 'PayPal Sandbox Capture Verified'
-        };
-      }
+        const capturedAmount = Number(capture?.amount?.value);
+        const expectedAmount = Number(catalogueEntry.priceUsd.toFixed(2));
 
-      // Fallback for sandbox demo simulation if vaulted token was placeholder
-      if (mandate.vaultToken.startsWith('VAULT_SANDBOX_')) {
+        if (capRes.ok && capData.status === 'COMPLETED' && capture?.status === 'COMPLETED' && Math.abs(capturedAmount - expectedAmount) < 0.001 && capture?.id) {
+          return {
+            success: true,
+            orderId: orderData.id,
+            captureId: capture.id,
+            status: 'COMPLETED',
+            amount: capture.amount.value,
+            currency: 'USD',
+            note: 'PayPal Sandbox Orders v2 Capture Verified'
+          };
+        }
+
         return {
-          success: true,
-          captureId: `CAP-SANDBOX-VAULT-${Date.now()}`,
-          status: 'COMPLETED',
-          amount: catalogueEntry.priceUsd.toFixed(2),
-          currency: 'USD',
-          note: 'PayPal Sandbox Verified Mandate Simulation'
+          success: false,
+          error: capData.message || capData.name || `PayPal capture failed with status: ${capData.status || capRes.status}`
         };
       }
 
       return {
         success: false,
-        error: orderData.message || orderData.name || 'PayPal order creation failed'
+        error: orderData.message || orderData.name || `PayPal order creation failed with status: ${orderRes.status}`
       };
     } catch (err) {
       return {
@@ -374,6 +402,7 @@ export class BuyExecutor {
 
   /**
    * Execute x402 Base USDC Micropayment
+   * Production path is disabled and fails closed until full on-chain facilitator settlement is verified.
    */
   async _chargeX402Micro(catalogueEntry, decision) {
     if (this.x402Client) {
@@ -384,7 +413,7 @@ export class BuyExecutor {
       });
     }
 
-    const payerSecret = this.env.X402_PAYER_SECRET;
+    const payerSecret = this.env?.X402_PAYER_SECRET;
     if (!payerSecret) {
       return {
         success: false,
@@ -392,12 +421,11 @@ export class BuyExecutor {
       };
     }
 
-    // x402 settlement requires explicit live confirmation (§Real-money warning)
+    // Production x402 path fails closed with X402_NOT_IMPLEMENTED
     return {
-      success: true,
-      txHash: `0x${Math.random().toString(16).substring(2, 34)}`,
-      amount: catalogueEntry.priceUsd,
-      note: 'x402 Base USDC Micropayment Verified'
+      success: false,
+      error: 'X402_NOT_IMPLEMENTED',
+      reason: 'x402 on-chain settlement is not implemented for production in this build. Path is safely disabled.'
     };
   }
 }

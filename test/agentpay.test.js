@@ -712,7 +712,14 @@ test('20. BUY PayPal Success (Stubbed Vault): verified capture adds +1000 RPC, s
     body: JSON.stringify({
       sessionId: 'test_buy_paypal_success',
       quota: { rpc: { total: 5, remaining: 0, consumed: 5 } },
-      budgetCapUsd: 5.00
+      budgetCapUsd: 5.00,
+      mandate: {
+        vaultToken: 'BA-SANDBOX-TEST-20',
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc', 'read', 'file', 'quota_packs'],
+        rail: 'paypal'
+      }
     })
   }));
 
@@ -778,7 +785,14 @@ test('21. BUY Re-check Rejection: changed price or cap-exceeding decision reject
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       sessionId: 'test_buy_recheck_fail',
-      budgetCapUsd: 1.50 // Budget cap is $1.50, but pack costs $2.00
+      budgetCapUsd: 1.50, // Budget cap is $1.50, but pack costs $2.00
+      mandate: {
+        vaultToken: 'BA-SANDBOX-TEST-21',
+        budgetCapUsd: 1.50,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc'],
+        rail: 'paypal'
+      }
     })
   }));
 
@@ -827,7 +841,14 @@ test('22. BUY Idempotency: retrying the same decision id produces exactly 1 char
     body: JSON.stringify({
       sessionId: 'test_buy_idempotent',
       quota: { rpc: { total: 5, remaining: 0, consumed: 5 } },
-      budgetCapUsd: 5.00
+      budgetCapUsd: 5.00,
+      mandate: {
+        vaultToken: 'BA-SANDBOX-TEST-22',
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc', 'read', 'file', 'quota_packs'],
+        rail: 'paypal'
+      }
     })
   }));
 
@@ -924,4 +945,227 @@ test('23. x402 Disabled Without Wallet: missing X402_PAYER_SECRET records failur
   const failedTx = state.ledger.find(e => e.type === LedgerType.TRANSACTION && e.status === 'failed');
   assert.ok(failedTx, 'Failed transaction must be recorded in ledger');
   assert.match(failedTx.reasoning, /x402 wallet not configured/i);
+});
+
+test('24. PayPal Fail-Closed Without Keys: BuyExecutor with empty env and no injected client returns failure, 0 charges, buy_failed', async () => {
+  const sessionDO = createMockDO(); // env is {} (no PAYPAL_CLIENT_ID or PAYPAL_CLIENT_SECRET)
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_paypal_no_keys',
+      budgetCapUsd: 5.00,
+      quota: { rpc: { total: 5, remaining: 0, consumed: 5 } },
+      mandate: {
+        vaultToken: 'BA-REAL-TOKEN-12345',
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc', 'quota_packs'],
+        rail: 'paypal'
+      }
+    })
+  }));
+
+  const decision = {
+    id: 'dec_paypal_no_keys_24',
+    action: 'buy',
+    item: 'rpc-1000',
+    rail: 'paypal',
+    estimated_cost_usd: 2.00,
+    estimated_calls_covered: 1000,
+    guardrailStatus: 'accepted'
+  };
+
+  const buyRes = await sessionDO.fetch(new Request('https://do/buy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision })
+  }));
+
+  assert.equal(buyRes.status, 400);
+  const data = await buyRes.json();
+  assert.equal(data.success, false);
+  assert.equal(data.error, 'PAYPAL_KEYS_MISSING');
+
+  const state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  assert.equal(state.status, SessionStatus.BUY_FAILED);
+  assert.equal(state.spentUsd, 0.00, 'spentUsd must remain unchanged ($0.00)');
+  assert.equal(state.quota.rpc.remaining, 0, 'Quota must remain unchanged (0)');
+  
+  const failedTx = state.ledger.find(e => e.type === LedgerType.TRANSACTION && e.status === 'failed');
+  assert.ok(failedTx, 'Failed transaction must be recorded in ledger');
+  assert.match(failedTx.reasoning, /PAYPAL_KEYS_MISSING/);
+});
+
+test('25. Placeholder Token Rejected: mandate token starting with VAULT_ returns MANDATE_TOKEN_PLACEHOLDER with 0 charges', async () => {
+  const sessionDO = createMockDO();
+  await sessionDO.fetch(new Request('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: 'test_placeholder_mandate',
+      budgetCapUsd: 5.00,
+      quota: { rpc: { total: 5, remaining: 0, consumed: 5 } },
+      mandate: {
+        vaultToken: 'VAULT_SANDBOX_DELEGATION_MANDATE', // Placeholder token
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc', 'quota_packs'],
+        rail: 'paypal'
+      }
+    })
+  }));
+
+  let chargeCalls = 0;
+  sessionDO.paypalClient = {
+    charge: async () => {
+      chargeCalls++;
+      return { success: true };
+    }
+  };
+
+  const decision = {
+    id: 'dec_placeholder_25',
+    action: 'buy',
+    item: 'rpc-1000',
+    rail: 'paypal',
+    estimated_cost_usd: 2.00,
+    estimated_calls_covered: 1000,
+    guardrailStatus: 'accepted'
+  };
+
+  const buyRes = await sessionDO.fetch(new Request('https://do/buy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision })
+  }));
+
+  assert.equal(buyRes.status, 403);
+  const data = await buyRes.json();
+  assert.equal(data.success, false);
+  assert.equal(data.error, 'MANDATE_TOKEN_PLACEHOLDER');
+  assert.equal(chargeCalls, 0, 'Zero PayPal charge calls must be made');
+
+  const state = await (await sessionDO.fetch(new Request('https://do/state'))).json();
+  assert.equal(state.status, SessionStatus.NEEDS_MANDATE_AMENDMENT);
+  assert.equal(state.spentUsd, 0.00, 'Zero spend');
+  assert.equal(state.quota.rpc.remaining, 0, 'Zero quota added');
+});
+
+test('26. x402 Production Path Fails Closed: without injected test client returns failure, no txHash produced, PayPal unaffected', async () => {
+  // Scenario A: X402_PAYER_SECRET is set, but running in production (no injected client)
+  const executor = new BuyExecutor({
+    env: { X402_PAYER_SECRET: '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef' }
+  });
+
+  const session = {
+    sessionId: 'test_x402_fail_closed',
+    budgetCapUsd: 5.00,
+    spentUsd: 0.00,
+    status: SessionStatus.AWAITING_PURCHASE,
+    mandate: {
+      budgetCapUsd: 5.00,
+      maxPerPurchaseUsd: 2.50,
+      allowedCategories: ['rpc'],
+      rail: 'x402'
+    },
+    transactions: [],
+    ledger: []
+  };
+
+  const decision = {
+    id: 'dec_x402_prod_26',
+    action: 'buy',
+    item: 'x402-rpc-micro',
+    rail: 'x402',
+    estimated_cost_usd: 0.001,
+    estimated_calls_covered: 1,
+    guardrailStatus: 'accepted'
+  };
+
+  const res = await executor.executeBuy(session, decision);
+  assert.equal(res.success, false);
+  assert.equal(res.error, 'X402_NOT_IMPLEMENTED');
+  assert.equal(res.txHash, undefined, 'No fake or random txHash must be produced');
+  assert.equal(res.sessionStatus, SessionStatus.BUY_FAILED);
+
+  // Scenario B: PayPal path remains unaffected
+  let paypalCalls = 0;
+  const mockPayPalClient = {
+    charge: async () => {
+      paypalCalls++;
+      return { success: true, captureId: 'CAP-REAL-SANDBOX-26', status: 'COMPLETED' };
+    }
+  };
+
+  const paypalExecutor = new BuyExecutor({
+    env: { X402_PAYER_SECRET: '0x1234' },
+    paypalClient: mockPayPalClient
+  });
+
+  const paypalSession = {
+    sessionId: 'test_paypal_unaffected',
+    budgetCapUsd: 5.00,
+    spentUsd: 0.00,
+    status: SessionStatus.AWAITING_PURCHASE,
+    mandate: {
+      vaultToken: 'BA-REAL-TOKEN-26',
+      budgetCapUsd: 5.00,
+      maxPerPurchaseUsd: 2.50,
+      allowedCategories: ['rpc'],
+      rail: 'paypal'
+    },
+    transactions: [],
+    ledger: []
+  };
+
+  const paypalDecision = {
+    id: 'dec_paypal_unaffected_26',
+    action: 'buy',
+    item: 'rpc-1000',
+    rail: 'paypal',
+    estimated_cost_usd: 2.00,
+    estimated_calls_covered: 1000,
+    guardrailStatus: 'accepted'
+  };
+
+  const paypalRes = await paypalExecutor.executeBuy(paypalSession, paypalDecision);
+  assert.equal(paypalRes.success, true);
+  assert.equal(paypalCalls, 1);
+  assert.equal(paypalRes.transaction.reference, 'CAP-REAL-SANDBOX-26');
+});
+
+test('27. Mandate Token Masking: mandate returned to dashboard never contains full token, and ledger contains zero full token strings', async () => {
+  const sessionDO = createMockDO();
+  const fullToken = 'BA-SECRET-VAULT-TOKEN-998877';
+
+  // Set mandate via DO handler
+  const setRes = await sessionDO.fetch(new Request('https://do/mandate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      vaultToken: fullToken,
+      budgetCapUsd: 5.00,
+      maxPerPurchaseUsd: 2.50
+    })
+  }));
+
+  const setData = await setRes.json();
+  assert.equal(setData.success, true);
+
+  // 1. Assert mandate object returned from handler never contains full token
+  assert.equal(setData.mandate.vaultToken.includes(fullToken), false, 'Handler return must not leak full token');
+  assert.match(setData.mandate.vaultToken, /\*{4}8877$/, 'Must be masked with last 4 characters only');
+
+  // 2. Assert state snapshot never contains full token
+  const stateRes = await sessionDO.fetch(new Request('https://do/state'));
+  const state = await stateRes.json();
+  assert.equal(state.mandate.vaultToken.includes(fullToken), false, 'State snapshot must not leak full token');
+  assert.equal(state.mandate._vaultToken, undefined, '_vaultToken must be stripped in public state');
+
+  // 3. Assert zero occurrences of full token anywhere in the ledger
+  for (const entry of state.ledger) {
+    const entryStr = JSON.stringify(entry);
+    assert.equal(entryStr.includes(fullToken), false, `Ledger entry ${entry.id} must not contain full token`);
+  }
 });
