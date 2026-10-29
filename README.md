@@ -54,7 +54,7 @@ AI agents executing multi-step tasks often hit external API rate limits, RPC cei
 
 - **Session Coordinator**: A single-threaded, stateful actor (`AgentSession` Durable Object) providing authoritative state management, atomic quota decrement, and an owner-controlled emergency freeze mechanism.
 - **Reasoning Core**: Powered by **Meta Muse Spark (`muse-spark-1.3`)** for strategic planning, resource estimation, and economic deliberation.
-- **Visual Receipts**: *Planned (31 Oct)* — Transaction receipt card rendering via Meta Muse Image (`muse-image-1.0`) persisted to R2 storage.
+- **Visual Receipts**: Autonomous visual payment receipt card rendering via Meta Muse Image (`muse-image-1.0`) persisted directly to R2 storage.
 - **Engineered with Meta Tooling**: Core runtime, state machine coordination, and agent loops were constructed using Meta's **Muse Code** coding agent.
 - **Config-Driven MCP Client**: Protocol-compliant (`2025-11-25`) Streamable HTTP client that dynamically discovers tools at runtime via `tools/list` across configured endpoints.
 - **Dual Payment Rails**:
@@ -99,7 +99,7 @@ agentpay/
 │   ├── dashboard.js      # Operator interface & real-time telemetry
 │   └── types.js          # Shared schemas, constants, and status definitions
 ├── test/
-│   └── agentpay.test.js  # 33-test integration & lifecycle suite
+│   └── agentpay.test.js  # 38-test integration & lifecycle suite
 ├── wrangler.toml         # Cloudflare Worker & Durable Object configuration
 ├── package.json
 └── LICENSE
@@ -118,6 +118,9 @@ agentpay/
 | `/api/session/:id/plan` | `POST` | Generate strategic plan via Muse Spark (advisory only) |
 | `/api/session/:id/deliberate`| `POST` | Trigger economic deliberation upon quota exhaustion |
 | `/api/session/:id/buy` | `POST` | Execute mandate-enforced purchase and refill quota |
+| `/api/session/:id/receipts/:txId` | `GET` | Serve visual receipt image generated via Muse Image from R2 |
+| `/api/session/:id/receipts/:txId/backfill` | `POST` | Backfill/regenerate visual receipt for verified successful buy |
+| `/api/session/:id/report` | `POST` | Generate narrative financial audit summary via Muse Spark |
 | `/api/session/:id/mandate` | `POST` | Authorize or update human-gated spending mandate |
 | `/api/session/:id/mandate/setup-token` | `POST` | Create PayPal Vault setup token for buyer authorization |
 | `/api/session/:id/mandate/paypal-callback` | `GET` | Handle buyer approval redirect and exchange for vault token |
@@ -132,7 +135,7 @@ agentpay/
 
 Secrets are configured via Worker environment bindings (never committed to repository):
 
-- `META_MODEL_API_KEY`: API key for Meta Muse Spark model calls (`muse-spark-1.3`).
+- `META_MODEL_API_KEY`: API key for Meta Muse Spark model calls (`muse-spark-1.3`) and Visual Receipts (`muse-image-1.0`).
 - `PAYPAL_CLIENT_ID`: PayPal Sandbox REST API App Client ID (set by operator).
 - `PAYPAL_CLIENT_SECRET`: PayPal Sandbox REST API App Client Secret (set by operator).
 - `X402_PAYER_SECRET`: *(Optional)* Payer private key for x402 Base USDC micropayments. When unset, the x402 path safely disables itself with a descriptive error while the PayPal Vault path remains fully operational.
@@ -155,7 +158,7 @@ Secrets are configured via Worker environment bindings (never committed to repos
 git clone https://github.com/deaabie/agentpay.git
 cd agentpay
 
-# Run full 33-test suite
+# Run full 38-test suite
 npm test
 ```
 

@@ -468,6 +468,82 @@ export default {
       if (subpath === '/stream' && request.method === 'GET') {
         return await doStub.fetch('https://do/stream');
       }
+
+      // GET /api/session/:id/receipts/:txId (Receipt image from R2)
+      const receiptImgMatch = subpath.match(/^\/receipts\/([^/]+)$/);
+      if (receiptImgMatch && request.method === 'GET') {
+        const txId = receiptImgMatch[1];
+        const imageKey = `receipt-${txId}.png`;
+        if (env.RECEIPTS_BUCKET && typeof env.RECEIPTS_BUCKET.get === 'function') {
+          const object = await env.RECEIPTS_BUCKET.get(imageKey);
+          if (object) {
+            return new Response(object.body, {
+              headers: {
+                ...corsHeaders,
+                'Content-Type': 'image/png',
+                'Cache-Control': 'public, max-age=86400'
+              }
+            });
+          }
+        }
+        return new Response(JSON.stringify({ error: 'Receipt image not found in storage' }), {
+          status: 404,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      // POST /api/session/:id/receipts/:txId/backfill or /receipts/backfill
+      const receiptBackfillMatch = subpath.match(/^\/receipts\/([^/]+)\/backfill$/) ||
+                                   subpath === '/receipts/backfill' ||
+                                   subpath === '/backfill-receipt';
+      if (receiptBackfillMatch && request.method === 'POST') {
+        const txId = Array.isArray(receiptBackfillMatch) ? receiptBackfillMatch[1] : null;
+        const body = await request.json().catch(() => ({}));
+        const payload = { transactionId: txId || body.transactionId || body.txId };
+        const res = await doStub.fetch('https://do/backfill-receipt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        return new Response(JSON.stringify(data), {
+          status: res.status,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+
+      // POST /api/session/:id/report (Narrative Financial Report Card via Muse Spark)
+      if (subpath === '/report' && request.method === 'POST') {
+        const res = await doStub.fetch('https://do/report', { method: 'POST' });
+        const data = await res.json();
+        return new Response(JSON.stringify(data), {
+          status: res.status,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    // Direct receipt image route: GET /api/receipts/:txId
+    const directReceiptMatch = path.match(/^\/api\/receipts\/([^/]+)$/);
+    if (directReceiptMatch && request.method === 'GET') {
+      const txId = directReceiptMatch[1];
+      const imageKey = `receipt-${txId}.png`;
+      if (env.RECEIPTS_BUCKET && typeof env.RECEIPTS_BUCKET.get === 'function') {
+        const object = await env.RECEIPTS_BUCKET.get(imageKey);
+        if (object) {
+          return new Response(object.body, {
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'image/png',
+              'Cache-Control': 'public, max-age=86400'
+            }
+          });
+        }
+      }
+      return new Response(JSON.stringify({ error: 'Receipt image not found in storage' }), {
+        status: 404,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
     }
 
     return new Response(JSON.stringify({ error: 'Endpoint not found' }), {

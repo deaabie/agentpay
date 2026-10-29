@@ -15,6 +15,7 @@ import { Brain } from './brain.js';
 import { Planner } from './plan.js';
 import { BuyExecutor } from './buy-executor.js';
 import { MetaModelAdapter } from './meta-adapter.js';
+import { ReceiptGenerator } from './receipts.js';
 
 export class AgentSession {
   constructor(state, env) {
@@ -87,6 +88,15 @@ export class AgentSession {
       if (action === 'mandate' && req.method === 'POST') {
         const body = await req.json().catch(() => ({}));
         return await this.handleMandate(body);
+      }
+
+      if (action === 'backfill-receipt' && req.method === 'POST') {
+        const body = await req.json().catch(() => ({}));
+        return await this.handleBackfillReceipt(body);
+      }
+
+      if (action === 'report' && req.method === 'POST') {
+        return await this.handleFinancialReport();
       }
 
       if (action === 'stream') {
@@ -359,6 +369,7 @@ export class AgentSession {
       costUsd: entry.costUsd !== undefined ? Number(entry.costUsd) : 0,
       rail: entry.rail || null,
       reasoning: entry.reasoning ? String(entry.reasoning).slice(0, 500) : null,
+      reference: entry.reference ? String(entry.reference).slice(0, 100) : null,
       status: entry.status || 'success'
     };
 
@@ -733,12 +744,186 @@ export class AgentSession {
       sessionStatus: session.status
     });
 
+    // Asynchronously trigger visual receipt generation without blocking or rolling back buy completion
+    this.triggerReceiptGeneration(session, buyResult.transaction, decision).catch(err => {
+      console.warn('[SessionDO] Background receipt generation failed:', err.message);
+    });
+
     return new Response(JSON.stringify({
       success: true,
       transaction: buyResult.transaction,
       spentUsd: session.spentUsd,
       refilledQuota: session.quota,
       sessionStatus: session.status
+    }), {
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  /**
+   * Internal async helper to generate and store receipt for a transaction
+   */
+  async triggerReceiptGeneration(session, transaction, decision) {
+    if (!transaction || transaction.status !== 'success' || !transaction.costUsd) {
+      return null;
+    }
+
+    if (!session.receipts) session.receipts = [];
+    const existing = session.receipts.find(r => r.transactionId === transaction.id && r.status === 'completed');
+    if (existing) {
+      return existing;
+    }
+
+    const adapter = this.adapter || new MetaModelAdapter({
+      apiKey: this.env?.META_MODEL_API_KEY
+    });
+
+    const generator = new ReceiptGenerator({
+      env: this.env,
+      adapter,
+      r2Bucket: this.env?.RECEIPTS_BUCKET
+    });
+
+    const receipt = await generator.generateReceipt({
+      transaction,
+      decision,
+      sessionId: session.sessionId || 'default'
+    });
+
+    const idx = session.receipts.findIndex(r => r.transactionId === transaction.id);
+    if (idx >= 0) {
+      session.receipts[idx] = receipt;
+    } else {
+      session.receipts.push(receipt);
+    }
+
+    session.updated_at = new Date().toISOString();
+    await this.state.storage.put('session', session);
+    this.broadcast('receipt_updated', { receipt, sessionId: session.sessionId });
+
+    return receipt;
+  }
+
+  /**
+   * Backfill or regenerate receipt for an existing verified transaction
+   */
+  async handleBackfillReceipt(body = {}) {
+    const session = await this.getState();
+    const txId = body.transactionId || body.txId;
+
+    let transaction = null;
+    if (txId) {
+      transaction = (session.ledger || []).find(x => x.id === txId && x.type === 'transaction');
+    } else {
+      const successTxs = (session.ledger || []).filter(x => x.type === 'transaction' && x.status === 'success' && x.costUsd > 0);
+      transaction = successTxs[successTxs.length - 1];
+    }
+
+    if (!transaction) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'TRANSACTION_NOT_FOUND',
+        message: 'No eligible successful settled transaction found for receipt backfill.'
+      }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (transaction.status !== 'success' || !transaction.costUsd) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'INVALID_TRANSACTION_STATUS',
+        message: 'Cannot generate receipt for non-successful or zero-cost transaction.'
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    if (!session.receipts) session.receipts = [];
+    const existing = session.receipts.find(r => r.transactionId === transaction.id && r.status === 'completed');
+    if (existing) {
+      return new Response(JSON.stringify({
+        success: true,
+        alreadyExists: true,
+        receipt: existing
+      }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    const decision = session.latestDecision;
+    const receipt = await this.triggerReceiptGeneration(session, transaction, decision);
+
+    return new Response(JSON.stringify({
+      success: receipt?.status === 'completed',
+      receipt
+    }), {
+      status: receipt?.status === 'completed' ? 200 : 502,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  /**
+   * Narrative Financial Report Card generator via Meta Muse Spark (muse-spark-1.3)
+   */
+  async handleFinancialReport() {
+    const session = await this.getState();
+    const cap = Number(session.budgetCapUsd) || 5.00;
+    const spent = Number(session.spentUsd) || 0;
+    const remaining = Number((cap - spent).toFixed(2));
+    const successTxs = (session.ledger || []).filter(x => x.type === 'transaction' && x.status === 'success');
+    const decisions = (session.ledger || []).filter(x => x.type === 'decision' && x.action === 'buy');
+
+    const promptMessages = [
+      {
+        role: 'system',
+        content: 'You are AgentPay Financial Auditor. Summarize autonomous operating budget procurement strictly and honestly from the provided ledger data. Only cite exact numbers from the ledger. Do not invent numbers.'
+      },
+      {
+        role: 'user',
+        content: `Audit this agent execution session:
+- Initial Budget Cap: $${cap.toFixed(2)}
+- Total Settled Spend: $${spent.toFixed(2)}
+- Remaining Budget: $${remaining.toFixed(2)}
+- Successful Procurements: ${JSON.stringify(successTxs.map(t => ({ item: t.item || 'rpc-1000', costUsd: t.costUsd, units: t.units, rail: t.rail, reference: t.reference })))}
+- Deliberation Rationale: ${JSON.stringify(decisions.map(d => d.reasoning))}
+
+Write a concise 2-3 sentence narrative financial summary explaining what was procured, the total expenditure, remaining budget, and why this procurement was necessary. Return ONLY the narrative prose.`
+      }
+    ];
+
+    let summary = `Task operating budget audit: $${spent.toFixed(2)} settled out of $${cap.toFixed(2)} delegated budget cap ($${remaining.toFixed(2)} remaining). Autonomous procurement executed ${successTxs.length} transaction(s) refilling required quota without human intervention.`;
+
+    try {
+      const adapter = this.adapter || new MetaModelAdapter({
+        apiKey: this.env?.META_MODEL_API_KEY
+      });
+      const res = await adapter.chat(promptMessages, { max_tokens: 512, temperature: 0.1 });
+      if (res?.text && res.text.trim().length > 0) {
+        summary = res.text.trim();
+      }
+    } catch (err) {
+      console.warn('[FinancialReport] Spark narrative call failed, using deterministic summary:', err.message);
+    }
+
+    session.financialReport = {
+      summary,
+      budgetCapUsd: cap,
+      spentUsd: spent,
+      remainingBudgetUsd: remaining,
+      transactionsSettled: successTxs.length,
+      generated_at: new Date().toISOString()
+    };
+
+    session.updated_at = new Date().toISOString();
+    await this.state.storage.put('session', session);
+    this.broadcast('report_updated', { report: session.financialReport });
+
+    return new Response(JSON.stringify({
+      success: true,
+      report: session.financialReport
     }), {
       headers: { 'Content-Type': 'application/json' }
     });

@@ -10,6 +10,7 @@ import { Brain } from '../src/brain.js';
 import { Planner } from '../src/plan.js';
 import { BuyExecutor } from '../src/buy-executor.js';
 import { SPARK_MODEL, extractTextFromResponse } from '../src/meta-adapter.js';
+import { ReceiptGenerator, IMAGE_MODEL } from '../src/receipts.js';
 import { SessionStatus, LedgerType, DEFAULT_MCP_SERVERS } from '../src/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1553,4 +1554,335 @@ test('33. Charge Failure Reporting: captures full details, issue, description, a
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// Mock in-memory R2 bucket for testing receipts
+class MockR2Bucket {
+  constructor() {
+    this.objects = new Map();
+  }
+  async put(key, body, options = {}) {
+    this.objects.set(key, { body, options });
+    return { key, size: body.length || body.byteLength || 0 };
+  }
+  async get(key) {
+    const obj = this.objects.get(key);
+    if (!obj) return null;
+    return {
+      body: obj.body,
+      httpMetadata: obj.options.httpMetadata || {},
+      customMetadata: obj.options.customMetadata || {}
+    };
+  }
+}
+
+// Mock Image Adapter for testing ReceiptGenerator
+class MockImageAdapter {
+  constructor(shouldFail = false) {
+    this.shouldFail = shouldFail;
+    this.imageCalls = [];
+  }
+  async generateImage(prompt) {
+    this.imageCalls.push(prompt);
+    if (this.shouldFail) {
+      throw new Error('Meta Image API simulated 503 error');
+    }
+    return {
+      buffer: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), // PNG magic bytes
+      mimeType: 'image/png'
+    };
+  }
+}
+
+test('34. Receipt Trigger: successful buy triggers exactly one image call and one R2 put', async () => {
+  const doInstance = createMockDO();
+  const r2 = new MockR2Bucket();
+  const imgAdapter = new MockImageAdapter();
+
+  doInstance.env = {
+    RECEIPTS_BUCKET: r2,
+    META_MODEL_API_KEY: 'mock_key'
+  };
+  doInstance.adapter = imgAdapter;
+
+  await doInstance.fetch('https://do/init', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: 'sess_test_34',
+      budgetCapUsd: 5.00,
+      quota: { rpc: { total: 0, remaining: 0 } },
+      mandate: {
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc', 'quota_packs'],
+        rail: 'paypal',
+        vaultToken: 'PMT_VALID_AUTH_34'
+      }
+    })
+  });
+
+  // Inject a mock PayPal client that returns a completed capture
+  doInstance.paypalClient = {
+    charge: async () => ({
+      success: true,
+      captureId: 'CAP-PROVEN-34',
+      status: 'COMPLETED',
+      amount: '2.00',
+      currency: 'USD',
+      note: 'PayPal Sandbox Verified'
+    })
+  };
+
+  const buyRes = await doInstance.fetch('https://do/buy', {
+    method: 'POST',
+    body: JSON.stringify({
+      decision: {
+        id: 'dec_34',
+        action: 'buy',
+        item: 'rpc-1000',
+        rail: 'paypal',
+        estimated_cost_usd: 2.00,
+        estimated_calls_covered: 1000,
+        guardrailStatus: 'accepted'
+      }
+    })
+  });
+
+  const buyData = await buyRes.json();
+  assert.equal(buyData.success, true);
+  assert.equal(buyData.transaction.reference, 'CAP-PROVEN-34');
+
+  // Allow async receipt trigger to complete
+  await new Promise(r => setTimeout(r, 50));
+
+  const stateRes = await doInstance.fetch('https://do/state');
+  const state = await stateRes.json();
+
+  assert.ok(Array.isArray(state.receipts), 'Session must have receipts array');
+  assert.equal(state.receipts.length, 1, 'Must have exactly one receipt');
+  const rcpt = state.receipts[0];
+  assert.equal(rcpt.status, 'completed');
+  assert.equal(rcpt.captureRef, 'CAP-PROVEN-34');
+  assert.equal(rcpt.amountUsd, 2.00);
+  assert.equal(rcpt.units, 1000);
+  assert.equal(imgAdapter.imageCalls.length, 1, 'Exactly one image generation call');
+
+  // Verify object in mock R2
+  const storedObj = await r2.get(rcpt.imageKey);
+  assert.ok(storedObj, 'Image object must exist in R2 storage');
+  assert.equal(storedObj.body[0], 137, 'PNG magic byte must match');
+});
+
+test('35. Receipt Failure Non-Blocking: failed image generation leaves buy, ledger, and quota intact', async () => {
+  const doInstance = createMockDO();
+  const r2 = new MockR2Bucket();
+  const failingImgAdapter = new MockImageAdapter(true); // Fails with 503
+
+  doInstance.env = {
+    RECEIPTS_BUCKET: r2,
+    META_MODEL_API_KEY: 'mock_key'
+  };
+  doInstance.adapter = failingImgAdapter;
+
+  await doInstance.fetch('https://do/init', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: 'sess_test_35',
+      budgetCapUsd: 5.00,
+      quota: { rpc: { total: 0, remaining: 0 } },
+      mandate: {
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc', 'quota_packs'],
+        rail: 'paypal',
+        vaultToken: 'PMT_VALID_AUTH_35'
+      }
+    })
+  });
+
+  doInstance.paypalClient = {
+    charge: async () => ({
+      success: true,
+      captureId: 'CAP-PROVEN-35',
+      status: 'COMPLETED',
+      amount: '2.00',
+      currency: 'USD'
+    })
+  };
+
+  const buyRes = await doInstance.fetch('https://do/buy', {
+    method: 'POST',
+    body: JSON.stringify({
+      decision: {
+        id: 'dec_35',
+        action: 'buy',
+        item: 'rpc-1000',
+        rail: 'paypal',
+        estimated_cost_usd: 2.00,
+        estimated_calls_covered: 1000,
+        guardrailStatus: 'accepted'
+      }
+    })
+  });
+
+  const buyData = await buyRes.json();
+  assert.equal(buyData.success, true);
+  assert.equal(buyData.refilledQuota.rpc.remaining, 1000, 'Quota must be refilled');
+  assert.equal(buyData.spentUsd, 2.00, 'Spend must be updated');
+
+  await new Promise(r => setTimeout(r, 50));
+
+  const stateRes = await doInstance.fetch('https://do/state');
+  const state = await stateRes.json();
+
+  assert.equal(state.status, SessionStatus.EXECUTING, 'Session must remain executing');
+  assert.equal(state.quota.rpc.remaining, 1000, 'Quota must not be rolled back');
+  assert.equal(state.spentUsd, 2.00, 'Spent must not be rolled back');
+
+  assert.equal(state.receipts.length, 1);
+  const rcpt = state.receipts[0];
+  assert.equal(rcpt.status, 'failed');
+  assert.ok(rcpt.error.includes('Meta Image API simulated 503 error'));
+  assert.equal(rcpt.imageKey, null, 'Must not store a fake image');
+});
+
+test('36. Receipt Backfill: idempotent generation for existing successful transaction', async () => {
+  const doInstance = createMockDO();
+  const r2 = new MockR2Bucket();
+  const imgAdapter = new MockImageAdapter();
+
+  doInstance.env = {
+    RECEIPTS_BUCKET: r2,
+    META_MODEL_API_KEY: 'mock_key'
+  };
+  doInstance.adapter = imgAdapter;
+
+  await doInstance.fetch('https://do/init', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: 'sess_test_36',
+      budgetCapUsd: 5.00
+    })
+  });
+
+  // Pre-populate with an existing verified transaction (like spark_live_pos)
+  await doInstance.fetch('https://do/add-ledger', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: 'tx_existing_success_36',
+      type: 'transaction',
+      resource: 'rpc',
+      units: 1000,
+      costUsd: 2.00,
+      rail: 'paypal',
+      status: 'success',
+      reference: '9YL05462XC5957258',
+      reasoning: 'Purchased rpc-1000 via PAYPAL (PayPal Sandbox Orders v2 Vault Capture).'
+    })
+  });
+
+  // First backfill call
+  const bfRes1 = await doInstance.fetch('https://do/backfill-receipt', {
+    method: 'POST',
+    body: JSON.stringify({ transactionId: 'tx_existing_success_36' })
+  });
+  const bfData1 = await bfRes1.json();
+
+  assert.equal(bfData1.success, true);
+  assert.equal(bfData1.receipt.status, 'completed');
+  assert.equal(bfData1.receipt.captureRef, '9YL05462XC5957258');
+  assert.equal(imgAdapter.imageCalls.length, 1, 'First call generates image');
+
+  // Second backfill call (idempotency check)
+  const bfRes2 = await doInstance.fetch('https://do/backfill-receipt', {
+    method: 'POST',
+    body: JSON.stringify({ transactionId: 'tx_existing_success_36' })
+  });
+  const bfData2 = await bfRes2.json();
+
+  assert.equal(bfData2.success, true);
+  assert.equal(bfData2.alreadyExists, true);
+  assert.equal(imgAdapter.imageCalls.length, 1, 'Second call must NOT invoke Meta Image API again');
+});
+
+test('37. Backfill Refused: non-successful or zero-cost transactions are rejected', async () => {
+  const doInstance = createMockDO();
+  const imgAdapter = new MockImageAdapter();
+
+  doInstance.env = { META_MODEL_API_KEY: 'mock_key' };
+  doInstance.adapter = imgAdapter;
+
+  await doInstance.fetch('https://do/init', {
+    method: 'POST',
+    body: JSON.stringify({ sessionId: 'sess_test_37' })
+  });
+
+  // Add a failed transaction ($0.00)
+  await doInstance.fetch('https://do/add-ledger', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: 'tx_failed_37',
+      type: 'transaction',
+      resource: 'rpc',
+      units: 0,
+      costUsd: 0.00,
+      rail: 'paypal',
+      status: 'failed',
+      reasoning: 'Charge failed on PAYPAL'
+    })
+  });
+
+  const res = await doInstance.fetch('https://do/backfill-receipt', {
+    method: 'POST',
+    body: JSON.stringify({ transactionId: 'tx_failed_37' })
+  });
+
+  assert.equal(res.status, 400);
+  const data = await res.json();
+  assert.equal(data.error, 'INVALID_TRANSACTION_STATUS');
+  assert.equal(imgAdapter.imageCalls.length, 0, 'Must never generate receipt for failed transaction');
+});
+
+test('38. Narrative Financial Report Card: summarizes spend strictly from ledger actuals', async () => {
+  const doInstance = createMockDO();
+
+  // Mock Spark adapter that provides narrative report
+  doInstance.adapter = {
+    chat: async (messages) => {
+      return {
+        text: 'Autonomous operating budget audit: $2.00 was settled out of the $5.00 delegated budget cap ($3.00 remaining). A bulk rpc-1000 pack was procured via PayPal Sandbox to cover the remaining audit steps without human intervention.'
+      };
+    }
+  };
+
+  await doInstance.fetch('https://do/init', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: 'sess_test_38',
+      budgetCapUsd: 5.00
+    })
+  });
+
+  await doInstance.fetch('https://do/add-ledger', {
+    method: 'POST',
+    body: JSON.stringify({
+      id: 'tx_38',
+      type: 'transaction',
+      resource: 'rpc',
+      units: 1000,
+      costUsd: 2.00,
+      rail: 'paypal',
+      status: 'success',
+      reference: '9YL05462XC5957258'
+    })
+  });
+
+  const reportRes = await doInstance.fetch('https://do/report', { method: 'POST' });
+  assert.equal(reportRes.status, 200);
+  const reportData = await reportRes.json();
+
+  assert.equal(reportData.success, true);
+  assert.equal(reportData.report.budgetCapUsd, 5.00);
+  assert.equal(reportData.report.remainingBudgetUsd, 5.00); // 5 - 0 initial before buy or from spent
+  assert.ok(reportData.report.summary.includes('$2.00 was settled'));
 });

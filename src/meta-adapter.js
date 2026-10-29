@@ -8,6 +8,7 @@
  */
 
 export const SPARK_MODEL = 'muse-spark-1.3';
+export const IMAGE_MODEL = 'muse-image-1.0';
 export const META_API_BASE = 'https://api.meta.ai/v1';
 
 /**
@@ -208,5 +209,64 @@ export class MetaModelAdapter {
       diagnostic,
       raw: data
     };
+  }
+
+  /**
+   * Generate an image using Meta Muse Image (muse-image-1.0)
+   * Standard tier only.
+   * @param {string} prompt
+   * @param {Object} [options]
+   * @returns {Promise<{buffer: Uint8Array, mimeType: string, raw: Object}>}
+   */
+  async generateImage(prompt, options = {}) {
+    if (!this.apiKey) {
+      throw new Error('META_MODEL_API_KEY is not configured in Worker secrets.');
+    }
+
+    const payload = {
+      model: options.model || IMAGE_MODEL,
+      prompt,
+      n: 1,
+      size: options.size || '1024x1024',
+      response_format: 'b64_json'
+    };
+
+    const res = await fetch(`${this.baseUrl}/images/generations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.apiKey}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Meta Image API error HTTP ${res.status}: ${errText}`);
+    }
+
+    const data = await res.json();
+    const item = data.data?.[0];
+
+    if (item?.b64_json) {
+      const binaryStr = atob(item.b64_json);
+      const len = binaryStr.length;
+      const buffer = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        buffer[i] = binaryStr.charCodeAt(i);
+      }
+      return { buffer, mimeType: 'image/png', raw: data };
+    }
+
+    if (item?.url) {
+      const imgRes = await fetch(item.url);
+      if (!imgRes.ok) {
+        throw new Error(`Failed to fetch generated image URL HTTP ${imgRes.status}`);
+      }
+      const arrayBuf = await imgRes.arrayBuffer();
+      return { buffer: new Uint8Array(arrayBuf), mimeType: 'image/png', raw: data };
+    }
+
+    throw new Error('Meta Image API response contained neither b64_json nor image url.');
   }
 }

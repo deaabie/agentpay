@@ -16,6 +16,10 @@ bindings = [
   { name = "AGENTPAY_SESSIONS", class_name = "AgentSession" }
 ]
 
+[[r2_buckets]]
+binding = "RECEIPTS_BUCKET"
+bucket_name = "agentpay-receipts"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["AgentSession"]
