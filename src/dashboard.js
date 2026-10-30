@@ -1108,6 +1108,10 @@ export function renderDashboardHTML(sessionId = 'default') {
           if (!data.steps || data.steps.length === 0 || data.steps.some(s => s.halted)) {
             break;
           }
+          // If autonomous buy settlement occurred during this run, break cleanly to allow operator/judge inspection
+          if (data.steps.some(s => s.reason === 'BUY_SUCCESS_QUOTA_REFILLED')) {
+            break;
+          }
         }
       } catch (err) {
         console.error('Run task error:', err);

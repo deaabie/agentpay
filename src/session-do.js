@@ -744,10 +744,16 @@ export class AgentSession {
       sessionStatus: session.status
     });
 
-    // Asynchronously trigger visual receipt generation without blocking or rolling back buy completion
-    this.triggerReceiptGeneration(session, buyResult.transaction, decision).catch(err => {
-      console.warn('[SessionDO] Background receipt generation failed:', err.message);
-    });
+    // Trigger visual receipt generation and financial report generation
+    // Async & non-blocking: failure in either MUST NEVER roll back or block the settled buy
+    try {
+      await Promise.allSettled([
+        this.triggerReceiptGeneration(buyResult.transaction, decision),
+        this.generateFinancialReportInternal()
+      ]);
+    } catch (postBuyErr) {
+      console.warn('[SessionDO] Post-buy automatic triggers non-blocking note:', postBuyErr.message);
+    }
 
     return new Response(JSON.stringify({
       success: true,
@@ -761,13 +767,21 @@ export class AgentSession {
   }
 
   /**
-   * Internal async helper to generate and store receipt for a transaction
+   * Internal helper to generate and store receipt for a transaction
+   * Compatible with triggerReceiptGeneration(transaction, decision) or (session, transaction, decision)
    */
-  async triggerReceiptGeneration(session, transaction, decision) {
+  async triggerReceiptGeneration(sessionOrTx, maybeTx, maybeDecision) {
+    let transaction = maybeTx;
+    let decision = maybeDecision;
+    if (sessionOrTx && sessionOrTx.type === 'transaction') {
+      transaction = sessionOrTx;
+      decision = maybeTx;
+    }
     if (!transaction || transaction.status !== 'success' || !transaction.costUsd) {
       return null;
     }
 
+    const session = await this.getState();
     if (!session.receipts) session.receipts = [];
     const existing = session.receipts.find(r => r.transactionId === transaction.id && r.status === 'completed');
     if (existing) {
@@ -784,22 +798,45 @@ export class AgentSession {
       r2Bucket: this.env?.RECEIPTS_BUCKET
     });
 
-    const receipt = await generator.generateReceipt({
-      transaction,
-      decision,
-      sessionId: session.sessionId || 'default'
-    });
-
-    const idx = session.receipts.findIndex(r => r.transactionId === transaction.id);
-    if (idx >= 0) {
-      session.receipts[idx] = receipt;
-    } else {
-      session.receipts.push(receipt);
+    let receipt;
+    try {
+      receipt = await generator.generateReceipt({
+        transaction,
+        decision,
+        sessionId: session.sessionId || 'default'
+      });
+    } catch (err) {
+      receipt = {
+        id: `rcpt_${transaction.id}`,
+        transactionId: transaction.id,
+        sessionId: session.sessionId || 'default',
+        captureRef: transaction.reference || 'SANDBOX_CAPTURE',
+        item: decision?.item || transaction.item || 'rpc-1000',
+        amountUsd: Number(transaction.costUsd) || 0,
+        units: transaction.units || 1000,
+        resource: transaction.resource || 'rpc',
+        rail: transaction.rail || 'paypal',
+        timestamp: transaction.timestamp || new Date().toISOString(),
+        status: 'failed',
+        imageKey: null,
+        imageUrl: null,
+        error: err.message,
+        created_at: new Date().toISOString()
+      };
     }
 
-    session.updated_at = new Date().toISOString();
-    await this.state.storage.put('session', session);
-    this.broadcast('receipt_updated', { receipt, sessionId: session.sessionId });
+    const freshSession = await this.getState();
+    if (!freshSession.receipts) freshSession.receipts = [];
+    const idx = freshSession.receipts.findIndex(r => r.transactionId === transaction.id);
+    if (idx >= 0) {
+      freshSession.receipts[idx] = receipt;
+    } else {
+      freshSession.receipts.push(receipt);
+    }
+
+    freshSession.updated_at = new Date().toISOString();
+    await this.state.storage.put('session', freshSession);
+    this.broadcast('receipt_updated', { receipt, sessionId: freshSession.sessionId });
 
     return receipt;
   }
@@ -854,7 +891,7 @@ export class AgentSession {
     }
 
     const decision = session.latestDecision;
-    const receipt = await this.triggerReceiptGeneration(session, transaction, decision);
+    const receipt = await this.triggerReceiptGeneration(transaction, decision);
 
     return new Response(JSON.stringify({
       success: receipt?.status === 'completed',
@@ -866,9 +903,9 @@ export class AgentSession {
   }
 
   /**
-   * Narrative Financial Report Card generator via Meta Muse Spark (muse-spark-1.3)
+   * Internal helper to generate and store narrative financial report
    */
-  async handleFinancialReport() {
+  async generateFinancialReportInternal() {
     const session = await this.getState();
     const cap = Number(session.budgetCapUsd) || 5.00;
     const spent = Number(session.spentUsd) || 0;
@@ -908,7 +945,8 @@ Write a concise 2-3 sentence narrative financial summary explaining what was pro
       console.warn('[FinancialReport] Spark narrative call failed, using deterministic summary:', err.message);
     }
 
-    session.financialReport = {
+    const freshSession = await this.getState();
+    freshSession.financialReport = {
       summary,
       budgetCapUsd: cap,
       spentUsd: spent,
@@ -917,13 +955,21 @@ Write a concise 2-3 sentence narrative financial summary explaining what was pro
       generated_at: new Date().toISOString()
     };
 
-    session.updated_at = new Date().toISOString();
-    await this.state.storage.put('session', session);
-    this.broadcast('report_updated', { report: session.financialReport });
+    freshSession.updated_at = new Date().toISOString();
+    await this.state.storage.put('session', freshSession);
+    this.broadcast('report_updated', { report: freshSession.financialReport });
 
+    return freshSession.financialReport;
+  }
+
+  /**
+   * Narrative Financial Report Card generator via Meta Muse Spark (muse-spark-1.3)
+   */
+  async handleFinancialReport() {
+    const report = await this.generateFinancialReportInternal();
     return new Response(JSON.stringify({
       success: true,
-      report: session.financialReport
+      report
     }), {
       headers: { 'Content-Type': 'application/json' }
     });

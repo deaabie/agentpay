@@ -1886,3 +1886,74 @@ test('38. Narrative Financial Report Card: summarizes spend strictly from ledger
   assert.equal(reportData.report.remainingBudgetUsd, 5.00); // 5 - 0 initial before buy or from spent
   assert.ok(reportData.report.summary.includes('$2.00 was settled'));
 });
+
+test('39. Automatic Post-Buy Triggers: successful buy automatically populates receipts and financialReport', async () => {
+  const doInstance = createMockDO();
+  const r2 = new MockR2Bucket();
+  const imgAdapter = new MockImageAdapter();
+
+  doInstance.env = {
+    RECEIPTS_BUCKET: r2,
+    META_MODEL_API_KEY: 'mock_key'
+  };
+  doInstance.adapter = imgAdapter;
+
+  await doInstance.fetch('https://do/init', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: 'sess_test_39',
+      budgetCapUsd: 5.00,
+      quota: { rpc: { total: 0, remaining: 0 } },
+      mandate: {
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc'],
+        rail: 'paypal',
+        vaultToken: 'PMT_VALID_AUTH_39'
+      }
+    })
+  });
+
+  doInstance.paypalClient = {
+    charge: async () => ({
+      success: true,
+      captureId: 'CAP-AUTO-39',
+      status: 'COMPLETED',
+      amount: '2.00',
+      currency: 'USD'
+    })
+  };
+
+  const buyRes = await doInstance.fetch('https://do/buy', {
+    method: 'POST',
+    body: JSON.stringify({
+      decision: {
+        id: 'dec_39',
+        action: 'buy',
+        item: 'rpc-1000',
+        rail: 'paypal',
+        estimated_cost_usd: 2.00,
+        estimated_calls_covered: 1000,
+        guardrailStatus: 'accepted'
+      }
+    })
+  });
+
+  const buyData = await buyRes.json();
+  assert.equal(buyData.success, true);
+
+  const stateRes = await doInstance.fetch('https://do/state');
+  const state = await stateRes.json();
+
+  // Verify both receipt and financialReport are automatically populated without any manual clicks
+  assert.ok(Array.isArray(state.receipts), 'Must have receipts array');
+  assert.equal(state.receipts.length, 1, 'Must auto-generate exactly 1 receipt');
+  assert.equal(state.receipts[0].status, 'completed');
+  assert.equal(state.receipts[0].captureRef, 'CAP-AUTO-39');
+
+  assert.ok(state.financialReport, 'Must auto-generate financialReport on buy completion');
+  assert.equal(state.financialReport.budgetCapUsd, 5.00);
+  assert.equal(state.financialReport.spentUsd, 2.00);
+  assert.equal(state.financialReport.remainingBudgetUsd, 3.00);
+  assert.equal(state.financialReport.transactionsSettled, 1);
+});
