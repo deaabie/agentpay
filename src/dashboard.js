@@ -555,6 +555,7 @@ export function renderDashboardHTML(sessionId = 'default') {
 
   <script>
     const sessionId = "${sessionId}";
+    let isTaskRunning = false;
 
     // Connect to Server-Sent Events stream for live real-time updates
     const evtSource = new EventSource('/api/session/' + sessionId + '/stream');
@@ -712,7 +713,7 @@ export function renderDashboardHTML(sessionId = 'default') {
         const tokenDisplay = document.getElementById('mandate-token-display');
         const authBtn = document.getElementById('btn-auth-paypal');
 
-        const hasToken = data.mandate.vaultToken && data.mandate.vaultToken !== 'VAULT_SANDBOX_DELEGATION_MANDATE' && !data.mandate.vaultToken.startsWith('VAULT_');
+        const hasToken = data.mandate.vaultToken && !data.mandate.vaultToken.startsWith('VAULT_');
 
         if (tokenDisplay) {
           tokenDisplay.innerText = hasToken ? data.mandate.vaultToken : 'None';
@@ -769,11 +770,19 @@ export function renderDashboardHTML(sessionId = 'default') {
       document.getElementById('read-percent').innerText = readPct + '%';
       document.getElementById('read-fill').style.width = readPct + '%';
 
+      // Check if buy has settled
+      const hasSuccessTx = (data.ledger || []).some(l => l.type === 'transaction' && l.status === 'success' && l.costUsd > 0);
+
       // Update status badge
       const badge = document.getElementById('status-badge');
       if (badge) {
         badge.className = 'status-badge';
-        if (data.status === 'executing') {
+        if (data.status === 'buy_completed' || data.status === 'halted_after_buy' || (data.status === 'executing' && hasSuccessTx && !isTaskRunning && sessionId !== 'spark_live_pos')) {
+          badge.style.background = 'var(--accent-green)';
+          badge.style.color = '#000000';
+          badge.innerText = 'HALTED (BUY SETTLED)';
+          document.getElementById('status-message').innerText = 'Autonomous buy settled ($2.00 / 1000 RPC). Loop cleanly halted for inspection. Ready to run.';
+        } else if (data.status === 'executing') {
           badge.classList.add('status-executing');
           badge.innerText = 'EXECUTING';
           document.getElementById('status-message').innerText = 'Executing multi-chain audit tasks via MCP tools...';
@@ -1090,6 +1099,7 @@ export function renderDashboardHTML(sessionId = 'default') {
       const btn = document.getElementById('btn-run');
       btn.disabled = true;
       btn.innerText = 'Running...';
+      isTaskRunning = true;
 
       try {
         while (true) {
@@ -1116,6 +1126,7 @@ export function renderDashboardHTML(sessionId = 'default') {
       } catch (err) {
         console.error('Run task error:', err);
       } finally {
+        isTaskRunning = false;
         btn.disabled = false;
         btn.innerText = '▶ Run Agent Task';
         fetchState();

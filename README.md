@@ -94,12 +94,13 @@ agentpay/
 │   ├── plan.js           # Strategic task planning via Muse Spark (advisory only)
 │   ├── brain.js          # Economic deliberation engine via Muse Spark
 │   ├── buy-executor.js   # Mandate verification & autonomous purchase settlement
+│   ├── receipts.js       # Visual receipt generator via Muse Image & R2 storage
 │   ├── meta-adapter.js   # Standard Meta model client (muse-spark-1.3)
 │   ├── mcp-client.js     # Generic Streamable HTTP MCP client
 │   ├── dashboard.js      # Operator interface & real-time telemetry
 │   └── types.js          # Shared schemas, constants, and status definitions
 ├── test/
-│   └── agentpay.test.js  # 38-test integration & lifecycle suite
+│   └── agentpay.test.js  # 39-test integration & lifecycle suite
 ├── wrangler.toml         # Cloudflare Worker & Durable Object configuration
 ├── package.json
 └── LICENSE
@@ -158,7 +159,7 @@ Secrets are configured via Worker environment bindings (never committed to repos
 git clone https://github.com/deaabie/agentpay.git
 cd agentpay
 
-# Run full 38-test suite
+# Run full 39-test suite
 npm test
 ```
 

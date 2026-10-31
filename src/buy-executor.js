@@ -139,7 +139,7 @@ export class BuyExecutor {
       }
 
       // Reject placeholder tokens (fail closed, no fake mandates allowed)
-      if (token === 'VAULT_SANDBOX_DELEGATION_MANDATE' || token.startsWith('VAULT_')) {
+      if (token.startsWith('VAULT_')) {
         const failedTx = {
           id: `tx_${Date.now()}_mandate_placeholder`,
           decisionId: decision.id,
