@@ -10,7 +10,7 @@
  * - Real-time SSE broadcasting to connected dashboards
  */
 
-import { SessionStatus, LedgerType, INITIAL_DEMO_QUOTA, CATALOGUE_ALLOWLIST, DEFAULT_MANDATE, maskVaultToken } from './types.js';
+import { SessionStatus, LedgerType, INITIAL_DEMO_QUOTA, CATALOGUE_ALLOWLIST, DEFAULT_MANDATE, SEALED_PROOF_SESSIONS, maskVaultToken } from './types.js';
 import { Brain } from './brain.js';
 import { Planner } from './plan.js';
 import { BuyExecutor } from './buy-executor.js';
@@ -31,6 +31,21 @@ export class AgentSession {
     const req = typeof request === 'string' ? new Request(request, init) : request;
     const url = new URL(req.url);
     const action = url.pathname.replace(/^\//, '');
+
+    // Server-side Defense-in-Depth: Block mutating actions on sealed proof sessions
+    const currentState = await this.getState();
+    if (SEALED_PROOF_SESSIONS.has(currentState.sessionId)) {
+      if (action !== 'state' && action !== 'stream') {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'SESSION_SEALED',
+          message: 'Session is an immutable proof artifact and cannot be modified.'
+        }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+    }
 
     try {
       if (action === 'init' && req.method === 'POST') {
@@ -119,6 +134,16 @@ export class AgentSession {
    * Initialize or reset a session
    */
   async handleInit(body) {
+    if (body.sessionId && SEALED_PROOF_SESSIONS.has(body.sessionId)) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'SESSION_SEALED',
+        message: 'Cannot re-initialize sealed proof session.'
+      }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
     let mandate = body.mandate ? JSON.parse(JSON.stringify(body.mandate)) : JSON.parse(JSON.stringify(DEFAULT_MANDATE));
     if (mandate.vaultToken) {
       const raw = mandate._vaultToken || mandate.vaultToken;
@@ -542,6 +567,16 @@ export class AgentSession {
    */
   async handlePlan(body = {}) {
     const session = await this.getState();
+    if (session.isFrozen) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'SESSION_FROZEN',
+        message: 'Cannot plan: session is frozen by kill switch.'
+      }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
     session.status = SessionStatus.PLANNING;
     session.updated_at = new Date().toISOString();
     await this.state.storage.put('session', session);
@@ -649,17 +684,28 @@ export class AgentSession {
   }
 
   /**
-   * Remove sensitive fields (like private unmasked _vaultToken) before exposing session
+   * Remove sensitive fields (like private unmasked _vaultToken) before exposing session.
+   * Recursively traverses data to ensure no nested object leaks _vaultToken.
    */
   _sanitizeSession(data) {
     if (!data || typeof data !== 'object') return data;
     const clone = JSON.parse(JSON.stringify(data));
-    if (clone.mandate && clone.mandate._vaultToken !== undefined) {
-      delete clone.mandate._vaultToken;
-    }
-    if (clone.session && clone.session.mandate && clone.session.mandate._vaultToken !== undefined) {
-      delete clone.session.mandate._vaultToken;
-    }
+    const stripToken = (obj) => {
+      if (!obj || typeof obj !== 'object') return;
+      if (Array.isArray(obj)) {
+        for (let i = 0; i < obj.length; i++) {
+          stripToken(obj[i]);
+        }
+        return;
+      }
+      if ('_vaultToken' in obj) {
+        delete obj._vaultToken;
+      }
+      for (const key of Object.keys(obj)) {
+        stripToken(obj[key]);
+      }
+    };
+    stripToken(clone);
     return clone;
   }
 
@@ -678,8 +724,36 @@ export class AgentSession {
       }), { status: 403, headers: { 'Content-Type': 'application/json' } });
     }
 
-    const decision = body.decision || session.latestDecision;
-    if (!decision || decision.action !== 'buy') {
+    // H1 Hardening: Only settle valid buy decisions with accepted guardrail status
+    let decision = session.latestDecision;
+
+    if (decision) {
+      if (decision.action !== 'buy' || decision.guardrailStatus !== 'accepted') {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'NO_VALID_BUY_DECISION',
+          reason: 'Active decision is not approved for buy settlement.'
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
+      // If a decision was passed in body, it MUST match the active deliberated decision id
+      if (body.decision && body.decision.id && body.decision.id !== decision.id) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'DECISION_MISMATCH',
+          reason: 'Provided decision does not match active deliberated decision.'
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
+    } else if (body.decision) {
+      // In direct DO invocations (e.g. tests), decision must be explicitly accepted
+      if (body.decision.action !== 'buy' || body.decision.guardrailStatus !== 'accepted') {
+        return new Response(JSON.stringify({
+          success: false,
+          error: 'NO_VALID_BUY_DECISION',
+          reason: 'Decision is not approved with accepted guardrails.'
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
+      decision = body.decision;
+    } else {
       return new Response(JSON.stringify({
         success: false,
         error: 'NO_VALID_BUY_DECISION',
@@ -704,14 +778,15 @@ export class AgentSession {
     const buyResult = await executor.executeBuy(session, decision);
 
     if (!buyResult.success) {
-      session.status = buyResult.sessionStatus;
-      session.latestBuyReason = buyResult.reason || buyResult.error || null;
+      const freshSession = await this.getState();
+      freshSession.status = buyResult.sessionStatus;
+      freshSession.latestBuyReason = buyResult.reason || buyResult.error || null;
       if (buyResult.transaction) {
-        session.ledger.push(buyResult.transaction);
+        freshSession.ledger.push(buyResult.transaction);
       }
-      session.updated_at = new Date().toISOString();
-      await this.state.storage.put('session', session);
-      this.broadcast('status_changed', { status: session.status, reason: buyResult.reason });
+      freshSession.updated_at = new Date().toISOString();
+      await this.state.storage.put('session', freshSession);
+      this.broadcast('status_changed', { status: freshSession.status, reason: buyResult.reason });
 
       return new Response(JSON.stringify(buyResult), {
         status: buyResult.sessionStatus === SessionStatus.NEEDS_MANDATE_AMENDMENT ? 403 : 400,
@@ -725,23 +800,33 @@ export class AgentSession {
       });
     }
 
+    // M1 Concurrency Hardening: Re-read fresh state after charge to prevent lost updates or double charges
+    const freshSession = await this.getState();
+    if (!freshSession.transactions) freshSession.transactions = [];
+
+    // Check if another concurrent call already recorded this transaction
+    if (freshSession.transactions.some(t => t.id === buyResult.transaction?.id || (t.reference && t.reference === buyResult.transaction?.reference))) {
+      return new Response(JSON.stringify({ ...buyResult, alreadyProcessed: true }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
     // Process successful buy: refill quota, record ledger, increment spentUsd
-    session.ledger.push(buyResult.transaction);
-    if (!session.transactions) session.transactions = [];
-    session.transactions.push(buyResult.transaction);
+    freshSession.ledger.push(buyResult.transaction);
+    freshSession.transactions.push(buyResult.transaction);
 
-    session.spentUsd = Number((session.spentUsd + buyResult.chargedAmountUsd).toFixed(4));
-    session.quota[buyResult.resourceKey].remaining += buyResult.unitsToAdd;
-    session.quota[buyResult.resourceKey].total += buyResult.unitsToAdd;
-    session.status = SessionStatus.EXECUTING;
-    session.updated_at = new Date().toISOString();
+    freshSession.spentUsd = Number((freshSession.spentUsd + buyResult.chargedAmountUsd).toFixed(4));
+    freshSession.quota[buyResult.resourceKey].remaining += buyResult.unitsToAdd;
+    freshSession.quota[buyResult.resourceKey].total += buyResult.unitsToAdd;
+    freshSession.status = SessionStatus.EXECUTING;
+    freshSession.updated_at = new Date().toISOString();
 
-    await this.state.storage.put('session', session);
+    await this.state.storage.put('session', freshSession);
     this.broadcast('buy_completed', {
       transaction: buyResult.transaction,
-      spentUsd: session.spentUsd,
-      quota: session.quota,
-      sessionStatus: session.status
+      spentUsd: freshSession.spentUsd,
+      quota: freshSession.quota,
+      sessionStatus: freshSession.status
     });
 
     // Trigger visual receipt generation and financial report generation
@@ -758,9 +843,9 @@ export class AgentSession {
     return new Response(JSON.stringify({
       success: true,
       transaction: buyResult.transaction,
-      spentUsd: session.spentUsd,
-      refilledQuota: session.quota,
-      sessionStatus: session.status
+      spentUsd: freshSession.spentUsd,
+      refilledQuota: freshSession.quota,
+      sessionStatus: freshSession.status
     }), {
       headers: { 'Content-Type': 'application/json' }
     });
@@ -1010,7 +1095,8 @@ Write a concise 2-3 sentence narrative financial summary explaining what was pro
    */
   broadcast(event, data) {
     const encoder = new TextEncoder();
-    const payload = encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const sanitized = this._sanitizeSession(data);
+    const payload = encoder.encode(`event: ${event}\ndata: ${JSON.stringify(sanitized)}\n\n`);
 
     for (const writer of this.subscribers) {
       writer.write(payload).catch(() => {

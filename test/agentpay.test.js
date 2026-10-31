@@ -11,7 +11,7 @@ import { Planner } from '../src/plan.js';
 import { BuyExecutor } from '../src/buy-executor.js';
 import { SPARK_MODEL, extractTextFromResponse } from '../src/meta-adapter.js';
 import { ReceiptGenerator, IMAGE_MODEL } from '../src/receipts.js';
-import { SessionStatus, LedgerType, DEFAULT_MCP_SERVERS } from '../src/types.js';
+import { SessionStatus, LedgerType, DEFAULT_MCP_SERVERS, SEALED_PROOF_SESSIONS } from '../src/types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1956,4 +1956,184 @@ test('39. Automatic Post-Buy Triggers: successful buy automatically populates re
   assert.equal(state.financialReport.spentUsd, 2.00);
   assert.equal(state.financialReport.remainingBudgetUsd, 3.00);
   assert.equal(state.financialReport.transactionsSettled, 1);
+});
+
+test('40. Server-Side Sealed Session Protection: mutating requests rejected with 403 SESSION_SEALED', async () => {
+  const doInstance = createMockDO();
+
+  // Directly set DO storage to represent an existing sealed proof session
+  await doInstance.state.storage.put('session', {
+    sessionId: 'spark_live_pos',
+    task: 'Audit multi-chain smart contracts & wallet activity on Base and Ethereum',
+    budgetCapUsd: 5.00,
+    spentUsd: 2.00,
+    status: SessionStatus.EXECUTING,
+    isFrozen: false,
+    quota: { rpc: { total: 1000, remaining: 1000, consumed: 0 } },
+    ledger: [{ id: 'ledg_1', type: 'transaction', status: 'success', costUsd: 2.00 }],
+    transactions: [{ id: 'tx_1', reference: '9YL05462XC5957258', costUsd: 2.00 }]
+  });
+
+  // Verify mutating DO routes return 403 SESSION_SEALED
+  const mutatingEndpoints = [
+    { url: 'https://do/init', method: 'POST', body: { budgetCapUsd: 10 } },
+    { url: 'https://do/freeze', method: 'POST', body: {} },
+    { url: 'https://do/plan', method: 'POST', body: {} },
+    { url: 'https://do/deliberate', method: 'POST', body: {} },
+    { url: 'https://do/buy', method: 'POST', body: {} },
+    { url: 'https://do/mandate', method: 'POST', body: { budgetCapUsd: 10 } },
+    { url: 'https://do/backfill-receipt', method: 'POST', body: { txId: 'tx_1' } },
+    { url: 'https://do/report', method: 'POST', body: {} }
+  ];
+
+  for (const ep of mutatingEndpoints) {
+    const res = await doInstance.fetch(ep.url, {
+      method: ep.method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ep.body)
+    });
+    assert.equal(res.status, 403, `Mutating endpoint ${ep.url} must return 403 on sealed session`);
+    const data = await res.json();
+    assert.equal(data.error, 'SESSION_SEALED');
+  }
+
+  // Attempting to call handleInit with sealed sessionId must also return 403
+  const freshDO = createMockDO();
+  const initRes = await freshDO.fetch('https://do/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'demo_auto_proof' })
+  });
+  assert.equal(initRes.status, 403);
+  const initData = await initRes.json();
+  assert.equal(initData.error, 'SESSION_SEALED');
+
+  // Verify read-only state route succeeds and data remains intact
+  const stateRes = await doInstance.fetch('https://do/state');
+  assert.equal(stateRes.status, 200);
+  const stateData = await stateRes.json();
+  assert.equal(stateData.spentUsd, 2.00);
+  assert.equal(stateData.sessionId, 'spark_live_pos');
+});
+
+test('41. Vault Token Leak Prevention Over SSE: zero _vaultToken strings in any broadcast event', async () => {
+  const doInstance = createMockDO();
+  const broadcastMessages = [];
+
+  // Mock SSE subscriber writer to collect all broadcast events
+  const mockWriter = {
+    write: async (chunk) => {
+      const text = new TextDecoder().decode(chunk);
+      broadcastMessages.push(text);
+    }
+  };
+  doInstance.subscribers.add(mockWriter);
+
+  // Initialize session with secret _vaultToken
+  await doInstance.fetch('https://do/init', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: 'sess_test_41',
+      budgetCapUsd: 5.00,
+      quota: { rpc: { total: 1, remaining: 1 } },
+      mandate: {
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        rail: 'paypal',
+        vaultToken: 'PMT_SECRET_VAULT_TOKEN_41'
+      }
+    })
+  });
+
+  // Trigger freeze (which broadcasts freeze_toggled)
+  await doInstance.fetch('https://do/freeze', { method: 'POST' });
+
+  // Unfreeze to allow quota deduction
+  await doInstance.fetch('https://do/freeze', { method: 'POST' });
+
+  // Trigger quota exhaustion (which broadcasts quota_exhausted)
+  await doInstance.fetch('https://do/deduct-quota', {
+    method: 'POST',
+    body: JSON.stringify({ resource: 'rpc', units: 10 })
+  });
+
+  assert.ok(broadcastMessages.length >= 3, 'Must have received multiple broadcast events');
+
+  // Strict verification: zero occurrences of _vaultToken or the secret token in any broadcast
+  for (const msg of broadcastMessages) {
+    assert.equal(msg.includes('_vaultToken'), false, `SSE broadcast must never leak _vaultToken: ${msg}`);
+    assert.equal(msg.includes('PMT_SECRET_VAULT_TOKEN_41'), false, `SSE broadcast must never leak raw secret vault token: ${msg}`);
+  }
+});
+
+test('42. Crafted Buy Bypass Rejection: buy only settles active accepted deliberation decision', async () => {
+  const doInstance = createMockDO();
+
+  await doInstance.fetch('https://do/init', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: 'sess_test_42',
+      budgetCapUsd: 5.00,
+      quota: { rpc: { total: 0, remaining: 0 } },
+      mandate: {
+        budgetCapUsd: 5.00,
+        maxPerPurchaseUsd: 2.50,
+        allowedCategories: ['rpc'],
+        rail: 'paypal',
+        vaultToken: 'PMT_VALID_AUTH_42'
+      }
+    })
+  });
+
+  // Case A: Attempt buy with no active deliberation decision
+  const noDecRes = await doInstance.fetch('https://do/buy', { method: 'POST', body: JSON.stringify({}) });
+  assert.equal(noDecRes.status, 400);
+  const noDecData = await noDecRes.json();
+  assert.equal(noDecData.error, 'NO_VALID_BUY_DECISION');
+
+  // Case B: Set active deliberation decision with guardrailStatus = 'rejected'
+  const session = await doInstance.getState();
+  session.latestDecision = {
+    id: 'dec_rejected_1',
+    action: 'buy',
+    item: 'rpc-1000',
+    rail: 'paypal',
+    guardrailStatus: 'rejected',
+    rejectionReason: 'Exceeds remaining budget'
+  };
+  await doInstance.state.storage.put('session', session);
+
+  const rejBuyRes = await doInstance.fetch('https://do/buy', { method: 'POST', body: JSON.stringify({}) });
+  assert.equal(rejBuyRes.status, 400);
+  const rejBuyData = await rejBuyRes.json();
+  assert.equal(rejBuyData.error, 'NO_VALID_BUY_DECISION');
+
+  // Case C: Active decision is accepted, but caller supplies a mismatched crafted decision
+  session.latestDecision = {
+    id: 'dec_approved_legit',
+    action: 'buy',
+    item: 'rpc-1000',
+    rail: 'paypal',
+    estimated_cost_usd: 2.00,
+    estimated_calls_covered: 1000,
+    guardrailStatus: 'accepted'
+  };
+  await doInstance.state.storage.put('session', session);
+
+  const mismatchRes = await doInstance.fetch('https://do/buy', {
+    method: 'POST',
+    body: JSON.stringify({
+      decision: {
+        id: 'dec_crafted_evil',
+        action: 'buy',
+        item: 'rpc-1000',
+        rail: 'paypal',
+        estimated_cost_usd: 2.00,
+        guardrailStatus: 'accepted'
+      }
+    })
+  });
+  assert.equal(mismatchRes.status, 400);
+  const mismatchData = await mismatchRes.json();
+  assert.equal(mismatchData.error, 'DECISION_MISMATCH');
 });

@@ -72,6 +72,16 @@ export const DEFAULT_MANDATE = {
 };
 
 /**
+ * Sealed Audit Proof Sessions
+ * Read-only proof sessions protected from all server-side mutations.
+ */
+export const SEALED_PROOF_SESSIONS = new Set([
+  'spark_live_pos',
+  'demo_auto_proof',
+  'demo_fresh_gate'
+]);
+
+/**
  * Mask payment token for display and logs (last 4 characters only)
  */
 export function maskVaultToken(token) {

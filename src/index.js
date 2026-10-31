@@ -18,7 +18,7 @@ import { AgentSession } from './session-do.js';
 import { AgentLoop } from './agent-loop.js';
 import { MetaModelAdapter, SPARK_MODEL } from './meta-adapter.js';
 import { renderDashboardHTML } from './dashboard.js';
-import { DEFAULT_MCP_SERVERS } from './types.js';
+import { DEFAULT_MCP_SERVERS, SEALED_PROOF_SESSIONS, maskVaultToken } from './types.js';
 
 export { AgentSession };
 
@@ -67,6 +67,25 @@ export default {
       const subpath = sessionMatch[2] || '';
       const doId = env.AGENTPAY_SESSIONS.idFromName(sessionId);
       const doStub = env.AGENTPAY_SESSIONS.get(doId);
+
+      // Guard: Sealed proof sessions are immutable on server (read-only)
+      if (SEALED_PROOF_SESSIONS.has(sessionId)) {
+        const isRead = request.method === 'GET' && (
+          subpath === '/state' ||
+          subpath === '/stream' ||
+          subpath.startsWith('/receipts/')
+        );
+        if (!isRead) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: 'SESSION_SEALED',
+            message: 'Session is an immutable proof artifact and cannot be modified.'
+          }), {
+            status: 403,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+      }
 
       // GET /api/session/:id/state
       if (subpath === '/state' && request.method === 'GET') {
@@ -157,11 +176,11 @@ export default {
 
       // POST /api/session/:id/buy (Trigger autonomous buy settlement)
       if (subpath === '/buy' && request.method === 'POST') {
-        const body = await request.json().catch(() => ({}));
+        // Enforce deliberation binding: public HTTP /buy only settles session.latestDecision
         const res = await doStub.fetch('https://do/buy', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
+          body: JSON.stringify({})
         });
         const data = await res.json();
         return new Response(JSON.stringify(data), {
@@ -436,7 +455,7 @@ export default {
 
           return new Response(JSON.stringify({
             success: true,
-            paymentTokenId: payData.id,
+            paymentTokenId: maskVaultToken(payData.id),
             mandate: mandateData.mandate
           }), {
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }

@@ -100,7 +100,7 @@ agentpay/
 │   ├── dashboard.js      # Operator interface & real-time telemetry
 │   └── types.js          # Shared schemas, constants, and status definitions
 ├── test/
-│   └── agentpay.test.js  # 39-test integration & lifecycle suite
+│   └── agentpay.test.js  # 42-test integration & lifecycle suite
 ├── wrangler.toml         # Cloudflare Worker & Durable Object configuration
 ├── package.json
 └── LICENSE
@@ -159,7 +159,7 @@ Secrets are configured via Worker environment bindings (never committed to repos
 git clone https://github.com/deaabie/agentpay.git
 cd agentpay
 
-# Run full 39-test suite
+# Run full 42-test suite
 npm test
 ```
 

@@ -601,6 +601,16 @@ export function renderDashboardHTML(sessionId = 'default') {
       fetchState();
     });
 
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
     async function fetchState() {
       try {
         const res = await fetch('/api/session/' + sessionId + '/state');
@@ -626,10 +636,10 @@ export function renderDashboardHTML(sessionId = 'default') {
               : (s.error ? ('Error: ' + s.error.slice(0, 16)) : 'Disconnected');
             return '<div class="server-item">' +
               '<div>' +
-                '<div class="server-name">' + s.name + '</div>' +
-                '<div class="server-url">' + s.url + '</div>' +
+                '<div class="server-name">' + escapeHtml(s.name) + '</div>' +
+                '<div class="server-url">' + escapeHtml(s.url) + '</div>' +
               '</div>' +
-              '<span class="' + pillClass + '">' + pillText + '</span>' +
+              '<span class="' + pillClass + '">' + escapeHtml(pillText) + '</span>' +
             '</div>';
           }).join('');
         } else {
@@ -926,13 +936,19 @@ export function renderDashboardHTML(sessionId = 'default') {
             const costStr = Number(item.costUsd || 0) > 0 ? '$' + Number(item.costUsd).toFixed(2) : '$0.00';
             const costColor = Number(item.costUsd || 0) > 0 ? '#00873D' : 'var(--text-muted)';
 
+            const escapedTime = escapeHtml((item.timestamp || '').slice(11, 19));
+            const escapedType = escapeHtml(item.type || '');
+            const escapedResource = escapeHtml(item.resource || '—');
+            const escapedUnits = escapeHtml(item.units !== undefined ? item.units : 0);
+            const escapedReasoning = escapeHtml(item.reasoning || '');
+
             return \`<tr>
-              <td style="white-space: nowrap;">\${item.timestamp.slice(11, 19)}</td>
-              <td><span style="background: \${typeBadgeBg}; color: \${typeColor}; padding: 2px 6px; border: 1px solid #000000; font-weight: 800; font-size: 10px; text-transform: uppercase;">\${item.type}</span></td>
-              <td style="font-weight: 700; color: #000000;">\${item.resource || '—'}</td>
-              <td style="font-weight: 700;">\${item.units}</td>
+              <td style="white-space: nowrap;">\${escapedTime}</td>
+              <td><span style="background: \${typeBadgeBg}; color: \${typeColor}; padding: 2px 6px; border: 1px solid #000000; font-weight: 800; font-size: 10px; text-transform: uppercase;">\${escapedType}</span></td>
+              <td style="font-weight: 700; color: #000000;">\${escapedResource}</td>
+              <td style="font-weight: 700;">\${escapedUnits}</td>
               <td style="color: \${costColor}; font-weight: 900;">\${costStr}</td>
-              <td style="color: #000000; font-weight: 600;">\${item.reasoning || ''}</td>
+              <td style="color: #000000; font-weight: 600;">\${escapedReasoning}</td>
             </tr>\`;
           }).join('');
         }
@@ -970,8 +986,8 @@ export function renderDashboardHTML(sessionId = 'default') {
             if (r.status === 'completed' && r.imageUrl) {
               return '<div class="receipt-card neo-card" style="display: flex; flex-wrap: wrap; gap: 20px; background: #FFFDF5; border: 3px solid #000000; box-shadow: 4px 4px 0px 0px #000000; padding: 18px; margin-bottom: 14px;">' +
                 '<div style="flex: 0 0 240px; text-align: center;">' +
-                  '<img src="' + r.imageUrl + '" alt="Receipt ' + (r.captureRef || '') + '" style="width: 100%; max-width: 240px; border: 3px solid #000000; box-shadow: 3px 3px 0px 0px #000000; display: block;">' +
-                  '<div style="margin-top: 8px; font-size: 11px; font-weight: 700; color: #000000; font-family: monospace;">Key: ' + (r.imageKey || '') + '</div>' +
+                  '<img src="' + escapeHtml(r.imageUrl) + '" alt="Receipt ' + escapeHtml(r.captureRef || '') + '" style="width: 100%; max-width: 240px; border: 3px solid #000000; box-shadow: 3px 3px 0px 0px #000000; display: block;">' +
+                  '<div style="margin-top: 8px; font-size: 11px; font-weight: 700; color: #000000; font-family: monospace;">Key: ' + escapeHtml(r.imageKey || '') + '</div>' +
                 '</div>' +
                 '<div style="flex: 1; min-width: 260px; display: flex; flex-direction: column; justify-content: space-between;">' +
                   '<div>' +
@@ -980,16 +996,16 @@ export function renderDashboardHTML(sessionId = 'default') {
                       '<span class="status-badge" style="background: var(--accent-green); color: #000000;">Verified & Stored in R2</span>' +
                     '</div>' +
                     '<div style="font-size: 12px; font-family: monospace; color: #000000; line-height: 1.8;">' +
-                      '<div>Capture Reference: <strong style="color: #0070BA; font-weight: 800;">' + (r.captureRef || '—') + '</strong></div>' +
-                      '<div>Item Procured: <strong>' + (r.item || 'rpc-1000') + '</strong></div>' +
+                      '<div>Capture Reference: <strong style="color: #0070BA; font-weight: 800;">' + escapeHtml(r.captureRef || '—') + '</strong></div>' +
+                      '<div>Item Procured: <strong>' + escapeHtml(r.item || 'rpc-1000') + '</strong></div>' +
                       '<div>Settled Amount: <strong style="color: #00873D; font-weight: 800;">$' + Number(r.amountUsd || 0).toFixed(2) + ' USD</strong></div>' +
-                      '<div>Quota Refilled: <strong>+' + (r.units || 0) + ' ' + (r.resource || 'rpc').toUpperCase() + '</strong></div>' +
-                      '<div>Payment Rail: <strong>' + (r.rail || 'paypal').toUpperCase() + ' Sandbox Vault</strong></div>' +
-                      '<div>Settled Timestamp: <span>' + (r.timestamp ? new Date(r.timestamp).toLocaleString() : '—') + '</span></div>' +
+                      '<div>Quota Refilled: <strong>+' + (r.units || 0) + ' ' + escapeHtml((r.resource || 'rpc').toUpperCase()) + '</strong></div>' +
+                      '<div>Payment Rail: <strong>' + escapeHtml((r.rail || 'paypal').toUpperCase()) + ' Sandbox Vault</strong></div>' +
+                      '<div>Settled Timestamp: <span>' + (r.timestamp ? escapeHtml(new Date(r.timestamp).toLocaleString()) : '—') + '</span></div>' +
                     '</div>' +
                   '</div>' +
                   '<div style="margin-top: 12px;">' +
-                    '<button class="neo-btn" style="padding: 6px 14px; font-size: 11px; background: var(--accent-yellow); color: #000000;" data-txid="' + r.transactionId + '" onclick="backfillReceipt(this.dataset.txid)">🔄 Regenerate Visual Asset</button>' +
+                    '<button class="neo-btn" style="padding: 6px 14px; font-size: 11px; background: var(--accent-yellow); color: #000000;" data-txid="' + escapeHtml(r.transactionId) + '" onclick="backfillReceipt(this.dataset.txid)">🔄 Regenerate Visual Asset</button>' +
                   '</div>' +
                 '</div>' +
               '</div>';
@@ -997,9 +1013,9 @@ export function renderDashboardHTML(sessionId = 'default') {
               return '<div class="neo-card" style="background: #FFF0F5; border: 3px solid var(--accent-pink); box-shadow: 4px 4px 0px 0px var(--accent-pink); padding: 16px; margin-bottom: 14px;">' +
                 '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">' +
                   '<strong style="color: #000000;">Receipt Generation Pending / Failed</strong>' +
-                  '<button class="neo-btn" style="padding: 6px 12px; font-size: 11px; background: var(--accent-green); color: #000000;" data-txid="' + r.transactionId + '" onclick="backfillReceipt(this.dataset.txid)">🔄 Retry Receipt Generation</button>' +
+                  '<button class="neo-btn" style="padding: 6px 12px; font-size: 11px; background: var(--accent-green); color: #000000;" data-txid="' + escapeHtml(r.transactionId) + '" onclick="backfillReceipt(this.dataset.txid)">🔄 Retry Receipt Generation</button>' +
                 '</div>' +
-                '<div style="font-size: 11px; color: #000000; font-family: monospace; font-weight: 700;">' + (r.error || 'Image generation pending') + '</div>' +
+                '<div style="font-size: 11px; color: #000000; font-family: monospace; font-weight: 700;">' + escapeHtml(r.error || 'Image generation pending') + '</div>' +
               '</div>';
             }
           }).join('');
@@ -1213,7 +1229,13 @@ export function renderDashboardHTML(sessionId = 'default') {
       fetchState();
     }
 
+    const isSealedProofSession = ['spark_live_pos', 'demo_auto_proof', 'demo_fresh_gate'].includes(sessionId);
+
     async function resetCurrentSession() {
+      if (isSealedProofSession) {
+        console.warn('Cannot reset sealed proof session:', sessionId);
+        return;
+      }
       const btn = document.getElementById('btn-reset');
       if (btn) {
         btn.disabled = true;
@@ -1250,12 +1272,12 @@ export function renderDashboardHTML(sessionId = 'default') {
     const customQuota = parseInt(urlParams.get('quota'), 10);
     const shouldReset = urlParams.get('reset') === 'true';
 
-    if (shouldReset) {
+    if (shouldReset && !isSealedProofSession) {
       resetCurrentSession().then(() => {
         const cleanUrl = window.location.pathname + (customQuota > 0 ? '?quota=' + customQuota + '&session=' + sessionId : '?session=' + sessionId);
         window.history.replaceState({}, '', cleanUrl);
       });
-    } else if (customQuota > 0) {
+    } else if (customQuota > 0 && !isSealedProofSession) {
       fetch('/api/session/' + sessionId + '/state')
         .then(r => r.json())
         .then(s => {
