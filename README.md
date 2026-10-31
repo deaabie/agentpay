@@ -85,8 +85,6 @@ AgentPay does not simulate payments. Three live purchases were executed against 
 | :---: | :---: |
 | ![spark_live_pos](docs/screenshots/spark_live_pos.png) | ![demo_auto_proof](docs/screenshots/demo_auto_proof.png) |
 
-*(Note: Live demo walkthrough video will be recorded and linked here on November 2 by Arby Pratama R.)*
-
 ---
 
 ## Autonomous Lifecycle: PLAN → EXECUTE → DELIBERATE → BUY
