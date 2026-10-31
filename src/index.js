@@ -19,8 +19,45 @@ import { AgentLoop } from './agent-loop.js';
 import { MetaModelAdapter, SPARK_MODEL } from './meta-adapter.js';
 import { renderDashboardHTML } from './dashboard.js';
 import { DEFAULT_MCP_SERVERS, SEALED_PROOF_SESSIONS, maskVaultToken } from './types.js';
+import { rateLimiter, RateLimiter } from './rate-limiter.js';
 
-export { AgentSession };
+function getClientIp(request) {
+  const cfIp = request.headers.get('cf-connecting-ip');
+  if (cfIp) return cfIp.trim();
+  const xForwarded = request.headers.get('x-forwarded-for');
+  if (xForwarded) return xForwarded.split(',')[0].trim();
+  return '127.0.0.1';
+}
+
+function getWriteCategory(subpath, method) {
+  if (method !== 'POST') return null;
+
+  if (
+    subpath === '/plan' ||
+    subpath === '/deliberate' ||
+    subpath === '/report' ||
+    subpath === '/receipts/backfill' ||
+    subpath === '/backfill-receipt' ||
+    /^\/receipts\/[^/]+\/backfill$/.test(subpath)
+  ) {
+    return 'model';
+  }
+
+  if (
+    subpath === '/init' ||
+    subpath === '/freeze' ||
+    subpath === '/step' ||
+    subpath === '/run' ||
+    subpath === '/buy' ||
+    subpath.startsWith('/mandate')
+  ) {
+    return 'mutation';
+  }
+
+  return null;
+}
+
+export { AgentSession, RateLimiter, rateLimiter };
 
 export default {
   async fetch(request, env, ctx) {
@@ -83,6 +120,27 @@ export default {
           }), {
             status: 403,
             headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+        }
+      }
+
+      // Rate limiting: H2 protection for write and model-trigger endpoints
+      const writeCategory = getWriteCategory(subpath, request.method);
+      if (writeCategory) {
+        const clientIp = getClientIp(request);
+        const limiter = env.rateLimiter || rateLimiter;
+        if (limiter.isRateLimited(clientIp, writeCategory)) {
+          return new Response(JSON.stringify({
+            success: false,
+            error: 'RATE_LIMITED',
+            message: 'Too many requests. Please wait before retrying.'
+          }), {
+            status: 429,
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'application/json',
+              'Retry-After': '60'
+            }
           });
         }
       }

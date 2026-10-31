@@ -12,6 +12,8 @@ import { BuyExecutor } from '../src/buy-executor.js';
 import { SPARK_MODEL, extractTextFromResponse } from '../src/meta-adapter.js';
 import { ReceiptGenerator, IMAGE_MODEL } from '../src/receipts.js';
 import { SessionStatus, LedgerType, DEFAULT_MCP_SERVERS, SEALED_PROOF_SESSIONS } from '../src/types.js';
+import worker from '../src/index.js';
+import { RateLimiter } from '../src/rate-limiter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -2136,4 +2138,168 @@ test('42. Crafted Buy Bypass Rejection: buy only settles active accepted deliber
   assert.equal(mismatchRes.status, 400);
   const mismatchData = await mismatchRes.json();
   assert.equal(mismatchData.error, 'DECISION_MISMATCH');
+});
+
+test('43. H2 Rate Limiting: per-IP limit on write endpoints returns 429, reads unaffected, sealed guard prioritized', async () => {
+  const testLimiter = new RateLimiter({
+    modelLimit: 3,     // low threshold for fast testing
+    mutationLimit: 5,  // low threshold for fast testing
+    windowMs: 60000
+  });
+
+  const mockDO = createMockDO();
+  const mockEnv = {
+    ENVIRONMENT: 'test',
+    rateLimiter: testLimiter,
+    AGENTPAY_SESSIONS: {
+      idFromName: (id) => id,
+      get: () => mockDO
+    }
+  };
+
+  const clientIp = '198.51.100.42';
+
+  // Subtest 1: General write endpoints (limit: 5)
+  for (let i = 0; i < 5; i++) {
+    const res = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/sess_test_43/freeze', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'cf-connecting-ip': clientIp
+      },
+      body: JSON.stringify({})
+    }), mockEnv);
+    assert.equal(res.status, 200, `Request ${i + 1} within threshold must succeed`);
+  }
+
+  // 6th request from same IP exceeds mutationLimit -> 429 RATE_LIMITED
+  const blockedRes = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/sess_test_43/freeze', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'cf-connecting-ip': clientIp
+    },
+    body: JSON.stringify({})
+  }), mockEnv);
+  assert.equal(blockedRes.status, 429);
+  const blockedData = await blockedRes.json();
+  assert.equal(blockedData.error, 'RATE_LIMITED');
+  assert.equal(blockedData.success, false);
+
+  // Subtest 2: Read requests (GET /state) from the same rate-limited IP are NOT blocked (must remain 200)
+  for (let i = 0; i < 5; i++) {
+    const readRes = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/sess_test_43/state', {
+      method: 'GET',
+      headers: {
+        'cf-connecting-ip': clientIp
+      }
+    }), mockEnv);
+    assert.equal(readRes.status, 200, 'GET /state must never be rate limited');
+  }
+
+  // Subtest 3: Sealed session mutation request takes precedence -> returns 403 SESSION_SEALED, NOT 429
+  const sealedRes = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/spark_live_pos/init', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'cf-connecting-ip': clientIp // even though this IP is rate-limited!
+    },
+    body: JSON.stringify({})
+  }), mockEnv);
+  assert.equal(sealedRes.status, 403, 'Sealed guard takes precedence over rate limit');
+  const sealedData = await sealedRes.json();
+  assert.equal(sealedData.error, 'SESSION_SEALED');
+
+  // Subtest 4: Different IP is not affected by first IP's rate limit
+  const otherIp = '203.0.113.99';
+  const otherRes = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/sess_test_43/freeze', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'cf-connecting-ip': otherIp
+    },
+    body: JSON.stringify({})
+  }), mockEnv);
+  assert.equal(otherRes.status, 200, 'Different client IP must not be rate limited');
+
+  // Subtest 5: Model-trigger endpoints (/deliberate) respect modelLimit (limit: 3)
+  for (let i = 0; i < 3; i++) {
+    const res = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/sess_test_43/deliberate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'cf-connecting-ip': otherIp
+      },
+      body: JSON.stringify({})
+    }), mockEnv);
+    assert.notEqual(res.status, 429, `Model request ${i + 1} within threshold must not be 429`);
+  }
+  const blockedModel = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/sess_test_43/deliberate', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'cf-connecting-ip': otherIp
+    },
+    body: JSON.stringify({})
+  }), mockEnv);
+  assert.equal(blockedModel.status, 429);
+  const blockedModelData = await blockedModel.json();
+  assert.equal(blockedModelData.error, 'RATE_LIMITED');
+});
+
+test('44. Fresh Session Dashboard Flow: standard lifecycle runs with production rate limits without false 429', async () => {
+  const prodLimiter = new RateLimiter(); // Default 10 model / 60 mutation
+  const mockDO = createMockDO();
+  const mockEnv = {
+    ENVIRONMENT: 'test',
+    rateLimiter: prodLimiter,
+    AGENTPAY_SESSIONS: {
+      idFromName: (id) => id,
+      get: () => mockDO
+    }
+  };
+
+  const clientIp = '192.0.2.1';
+
+  // 1. Init session
+  const initRes = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/fresh_demo_44/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': clientIp },
+    body: JSON.stringify({ task: 'Test run', budgetCapUsd: 5.00 })
+  }), mockEnv);
+  assert.equal(initRes.status, 200);
+
+  // 2. Fetch state multiple times (simulating dashboard polling)
+  for (let i = 0; i < 5; i++) {
+    const stateRes = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/fresh_demo_44/state', {
+      method: 'GET',
+      headers: { 'cf-connecting-ip': clientIp }
+    }), mockEnv);
+    assert.equal(stateRes.status, 200);
+  }
+
+  // 3. Toggle kill switch freeze / unfreeze
+  const freezeRes = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/fresh_demo_44/freeze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': clientIp },
+    body: JSON.stringify({})
+  }), mockEnv);
+  assert.equal(freezeRes.status, 200);
+
+  const unfreezeRes = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/fresh_demo_44/freeze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': clientIp },
+    body: JSON.stringify({})
+  }), mockEnv);
+  assert.equal(unfreezeRes.status, 200);
+
+  // 4. Update mandate
+  const mandateRes = await worker.fetch(new Request('https://agentpay.skuuy.com/api/session/fresh_demo_44/mandate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'cf-connecting-ip': clientIp },
+    body: JSON.stringify({ budgetCapUsd: 5.00, rail: 'paypal' })
+  }), mockEnv);
+  assert.equal(mandateRes.status, 200);
+
+  // Zero 429 errors throughout legitimate dashboard workflow
 });
