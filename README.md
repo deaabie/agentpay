@@ -26,7 +26,7 @@ To verify autonomous execution, spending guardrails, and real PayPal Sandbox set
 3. **Interactive Fresh Session ("Launch fresh test")**:
    - Clicking **Launch fresh test** provisions a new isolated session (`demo_xxxxxx`).
    - SESSIONS FAIL CLOSED: Without an authorized mandate, purchase attempts fail closed before any charge (zero charges without explicit human consent). This is a core safety guarantee, not a defect.
-   - *Note on Initial Loading*: On cold load, default placeholder counters may display briefly before the real state snapshot populates from the Durable Object (~20ms).
+   - *Note on Initial Loading*: On cold load, default placeholder counters may display briefly before the real state snapshot populates from the Durable Object (~20 seconds).
 
 ---
 
@@ -128,7 +128,7 @@ Following independent security audits, AgentPay incorporates multi-layered defen
 - **SSE Token Leak Prevention**: Sensitive payment method tokens (`_vaultToken`) are recursively sanitized from all Server-Sent Events (SSE) broadcasts (`freeze_toggled`, `quota_exhausted`, `snapshot`), state APIs, and public payloads. Only masked tokens (e.g. `****501f`) are ever exposed.
 - **Deliberation-Bound Settlement**: Public `POST /api/session/:id/buy` requests only settle the active, model-deliberated decision (`session.latestDecision`) with `guardrailStatus === 'accepted'`. Fabricated or mismatched external decision payloads are strictly rejected (`NO_VALID_BUY_DECISION` / `DECISION_MISMATCH`).
 - **Fail-Closed Guarantees**: Any failure condition—missing credentials, missing mandate, expired mandate, placeholder token, price tampering, or unlisted items—fails closed before initiating any payment rail request.
-- **Rate-Limited Mutation Endpoints**: Public write endpoints are rate-limited per client IP (10 requests/min for model-triggering endpoints like `/plan`, `/deliberate`, `/report`, `/backfill`; 60 requests/min for general state mutations) to prevent automated resource exhaustion (H2), while read routes remain unrestricted.
+- **Rate-Limited Mutation Endpoints**: Public write endpoints are rate-limited per client IP (10 requests/min for model-triggering endpoints like `/plan`, `/deliberate`, `/report`, `/backfill`; 60 requests/min for general state mutations) to prevent automated resource exhaustion (H2), while read routes remain unrestricted. Rate limiting is enforced per Worker isolate: the counters live in isolate memory, so the stated per-IP rates are best-effort abuse friction for a public demo, not a globally aggregated hard cap — a distributed attacker spreading requests across isolates could exceed the nominal rate.
 - **Zero Simulation Policy**: There is no mock/simulation switch in production. All purchase paths require real valid rails or fail safely with zero spend and zero quota.
 
 ---

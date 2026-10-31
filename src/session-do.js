@@ -6,7 +6,7 @@
  * - State machine: IDLE -> PLANNING -> EXECUTING -> MONITORING -> PAUSED_QUOTA_EXHAUSTED
  * - Strictly zero-log spend ledger
  * - Atomic quota tracking
- * - Owner-only kill switch (instant freeze)
+ * - Operator freeze button (public demo endpoint; sealed proof sessions are protected server-side)
  * - Real-time SSE broadcasting to connected dashboards
  */
 
@@ -240,7 +240,7 @@ export class AgentSession {
   }
 
   /**
-   * Owner-only kill switch toggle
+   * Operator freeze button toggle (public demo endpoint; sealed proof sessions are protected server-side)
    */
   async handleFreeze(shouldFreeze) {
     const session = await this.getState();

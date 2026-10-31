@@ -158,7 +158,7 @@ test('4. Clean Pause on Quota Exhaustion: stops at 0 without purchasing', async 
   assert.equal(data3.error, 'QUOTA_EXHAUSTED');
 });
 
-test('5. Owner-Only Kill Switch: freezes execution immediately', async () => {
+test('5. Operator Freeze Button: freezes execution immediately', async () => {
   const sessionDO = createMockDO();
   await sessionDO.fetch(new Request('https://do/init', {
     method: 'POST',
